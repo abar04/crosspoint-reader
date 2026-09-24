@@ -30,9 +30,10 @@ class HalClock {
   // shows immediately.
   void setTimezone(const char* posixTz);
 
-  // Current wall-clock time in the configured timezone.
+  // Current wall-clock time in the configured timezone. `fresh` bypasses the
+  // CLOCK_POLL_MS read cache for callers that need the current second.
   // Returns false if RTC is not available.
-  bool localTime(struct tm& out) const;
+  bool localTime(struct tm& out, bool fresh = false) const;
 
   // Get current local hour (0-23) and minute (0-59).
   // Returns false if RTC is not available.
@@ -42,6 +43,9 @@ class HalClock {
   // 24h mode produces "HH:MM" (needs >=6 bytes); 12h mode produces "H:MM AM"/"HH:MM PM" (needs >=9 bytes).
   // Returns false if RTC is not available.
   bool formatTime(char* buf, size_t bufSize, bool use12Hour = false) const;
+
+  // 12-hour clock marker ("AM"/"PM") for a 0-23 hour.
+  static const char* meridiem(int hour24) { return hour24 >= 12 ? "PM" : "AM"; }
 
   // Sync the RTC from an NTP server. Requires WiFi to be connected.
   // Blocks for up to ~5s while waiting for SNTP response.

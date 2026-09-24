@@ -34,6 +34,7 @@ Welcome to the **CrossPoint** firmware. This guide outlines the hardware control
         - [Option C: Self-Hosted Server (Docker Compose)](#option-c-self-hosted-server-docker-compose)
         - [Syncing While Reading](#syncing-while-reading)
     - [3.7 Sleep Screen](#37-sleep-screen)
+      - [Clock](#clock)
       - [Cover settings](#cover-settings)
       - [Custom images](#custom-images)
     - [3.8 Custom Fonts (SD Card)](#38-custom-fonts-sd-card)
@@ -218,6 +219,7 @@ The Settings screen allows you to configure the device's behavior. There are a f
   - "Cover + Custom" - The book cover image while actively reading, falls back to "Custom" behavior otherwise
   - "Quick resume" - The text of the last page read will be displayed on the sleep screen and a moon icon is shown on the edge of the screen. Waking up the device will return to the same page of the opened book. This is useful for quickly resuming reading without waiting for the device to fully wake up and load the book.
   - "Transparent" - A transparent overlay image drawn over the current screen; see [Sleep Screen](#37-sleep-screen) below for more information
+  - "Clock" (X3 only) - The current time in large digits, updated every minute while the device sleeps; see [Sleep Screen](#37-sleep-screen) below for more information
 - **Sleep Screen Cover Mode**: How to display the book cover when "Cover" sleep screen is selected:
   
   - "Fit" (default) - Scale the image down to fit centered on the screen, padding with white borders as necessary
@@ -536,6 +538,13 @@ The **Sleep Screen** setting controls what is displayed when the device goes to 
 | **Cover + Custom** | The cover of the currently open book, shown only while actively reading. Falls back to **Custom** behavior when not reading. |
 | **Transparent**    | A BMP or PNG overlay drawn over the current screen. Supports PNG and 32-bit BGRA alpha transparency, and treats white as transparent in regular BMPs. Falls back to **Dark** if no valid overlay image is found. |
 | **None**           | A blank screen.                                                                                                              |
+| **Clock** (X3 only) | The current time in large digits, updated every minute while the device sleeps (see below). Falls back to **Dark** if the clock can't be read. |
+
+#### Clock
+
+The **Clock** sleep screen is available on the X3, which has a battery-backed real-time clock. The device wakes briefly once a minute to redraw the digits and goes straight back to sleep, without loading books or the SD card. It uses the timezone and 12/24-hour format from **Settings -> System -> Clock**; set the time there with **Sync Clock Now** first. The first update of each hour refreshes the whole screen to clear ghosting.
+
+Waking once a minute uses more battery than the other sleep screens.
 
 #### Cover settings
 

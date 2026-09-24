@@ -34,11 +34,11 @@ void HalClock::setTimezone(const char* posixTz) {
   _lastPollMs = 0;  // re-derive local time under the new rule immediately
 }
 
-bool HalClock::localTime(struct tm& out) const {
+bool HalClock::localTime(struct tm& out, const bool fresh) const {
   if (!_available) return false;
 
   const unsigned long now = millis();
-  if (_lastPollMs == 0 || (now - _lastPollMs) >= CLOCK_POLL_MS) {
+  if (fresh || _lastPollMs == 0 || (now - _lastPollMs) >= CLOCK_POLL_MS) {
     Rtc::DateTime dt;
     if (_sdkRtc.now(dt)) {
       _cachedUtc = epochFromUtc(dt);
@@ -66,10 +66,9 @@ bool HalClock::formatTime(char* buf, size_t bufSize, bool use12Hour) const {
   if (!localTime(local)) return false;
 
   if (use12Hour) {
-    const bool pm = local.tm_hour >= 12;
     int hour12 = local.tm_hour % 12;
     if (hour12 == 0) hour12 = 12;
-    snprintf(buf, bufSize, "%d:%02d %s", hour12, local.tm_min, pm ? "PM" : "AM");
+    snprintf(buf, bufSize, "%d:%02d %s", hour12, local.tm_min, meridiem(local.tm_hour));
   } else {
     snprintf(buf, bufSize, "%02d:%02d", local.tm_hour, local.tm_min);
   }

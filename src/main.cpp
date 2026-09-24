@@ -32,6 +32,7 @@
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/ClockSleepScreen.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -277,6 +278,8 @@ void enterDeepSleep(bool fromTimeout = false) {
   // Commit to sleeping before goToSleep() runs the outgoing activity's onExit():
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
+  // The sleep screen replaces any earlier clock face; render() re-arms it.
+  ClockSleepScreen::deactivate();
   activityManager.goToSleep(fromTimeout);
 
   if (isQuickResumeSleep) {
@@ -296,8 +299,36 @@ void enterDeepSleep(bool fromTimeout = false) {
   halTiltSensor.deepSleep();
   display.deepSleep();
   Storage.prepareForDeepSleep();
+  ClockSleepScreen::armWakeTimer();
   LOG_DBG("MAIN", "Entering deep sleep");
 
+  powerManager.startDeepSleep(gpio);
+}
+
+// Timer wake armed by the Clock sleep screen: repaint the minute and go
+// straight back to sleep without mounting SD, loading settings or starting the
+// UI. Returns only when the wake can't be serviced; setup() then boots normally.
+static void serviceClockSleepWake() {
+  if (!ClockSleepScreen::isActive()) return;
+
+  halClock.begin();
+  ClockSleepScreen::restoreTimezone();
+  struct tm now;
+  if (!halClock.localTime(now, /*fresh=*/true)) {
+    LOG_ERR("MAIN", "Clock sleep wake: RTC read failed, booting normally");
+    return;
+  }
+
+  // An early timer wake leaves the display asleep and just re-arms.
+  if (ClockSleepScreen::needsRepaint(now)) {
+    display.begin(/*seamless=*/true);
+    renderer.begin();
+    renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
+    ClockSleepScreen::update(renderer, now);
+    display.deepSleep();
+  }
+
+  ClockSleepScreen::armWakeTimer();
   powerManager.startDeepSleep(gpio);
 }
 
@@ -381,6 +412,10 @@ void setup() {
   powerManager.begin();
 
   const auto wakeupReason = gpio.getWakeupReason();
+  if (wakeupReason == HalGPIO::WakeupReason::Timer) {
+    serviceClockSleepWake();
+  }
+
   // Sample the wake hold now — a click wake is released within milliseconds of
   // boot — but defer the sleep-or-boot decision until SETTINGS is loaded below:
   // click-to-wake is a setting, and an X4 battery power-off cuts all power, so
@@ -456,6 +491,8 @@ void setup() {
       if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
         Storage.prepareForDeepSleep();
+        // The panel still shows the clock face; keep it ticking.
+        ClockSleepScreen::armWakeTimer();
         powerManager.startDeepSleep(gpio);
       }
       wakePowerReleasePending = true;
@@ -478,6 +515,8 @@ void setup() {
 #endif
     case HalGPIO::WakeupReason::AfterFlash:
       // After flashing, just proceed to boot
+    case HalGPIO::WakeupReason::Timer:
+      // A clock-screen timer wake that couldn't be serviced boots normally.
     case HalGPIO::WakeupReason::Other:
     default:
       break;
