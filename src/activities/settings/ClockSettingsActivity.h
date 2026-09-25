@@ -8,8 +8,9 @@ class ClockSettingsActivity final : public UiListActivity {
  public:
   explicit ClockSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
 
-  // The last row (Pair iPhone) is only listed on devices with the phone link.
-  static constexpr int ITEM_COUNT = 6;
+  // The last three rows (the iPhone link) are only listed on devices with it.
+  static constexpr int ITEM_COUNT = 8;
+  static constexpr int PHONE_ITEM_COUNT = 3;
 
   void onEnter() override;
 

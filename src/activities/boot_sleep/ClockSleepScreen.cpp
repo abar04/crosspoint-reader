@@ -46,6 +46,9 @@ struct Face {
   uint8_t phoneFailures;  // consecutive syncs the phone missed
   uint8_t notificationCount;
   PhoneLink::Notification notifications[PhoneLink::MAX_NOTIFICATIONS];
+  int8_t phoneBattery;    // percent, -1 = unknown
+  uint32_t shownMinutes;  // face time as local minutes since 1970, for ages
+  uint8_t language;       // UI language, restored on timer wakes
 };
 RTC_DATA_ATTR Face face;
 
@@ -191,6 +194,15 @@ void drawNotifications(const GfxRenderer& renderer, const Face& f, int y) {
     const PhoneLink::Notification& n = f.notifications[i];
     renderer.fillRect(margin, y, width, 1);
     y += 8;
+    char age[16];
+    PhoneLink::formatAge(age, sizeof(age), n.arrivedMinutes, f.shownMinutes);
+    if (n.app[0] != '\0' || age[0] != '\0') {
+      char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
+      snprintf(meta, sizeof(meta), "%s%s%s", n.app, n.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
+      fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width, true, line, sizeof(line));
+      renderer.drawText(UI_10_FONT_ID, margin, y, line);
+      y += bodyH;
+    }
     if (n.title[0] != '\0') {
       fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, n.title, width, true, line, sizeof(line));
       renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
@@ -247,6 +259,13 @@ void drawFace(const GfxRenderer& renderer, const Face& f) {
     renderer.drawText(UI_12_FONT_ID, markerX, y + m.digitH + m.digitH / 10, marker, true, EpdFontFamily::BOLD);
     belowClock += m.digitH / 10 + renderer.getLineHeight(UI_12_FONT_ID);
   }
+  if (f.phoneSync && f.phoneBattery >= 0) {
+    char battery[32];
+    snprintf(battery, sizeof(battery), tr(STR_PHONE_BATTERY), static_cast<int>(f.phoneBattery));
+    belowClock += m.digitH / 10;
+    renderer.drawCenteredText(UI_10_FONT_ID, belowClock, battery);
+    belowClock += renderer.getLineHeight(UI_10_FONT_ID);
+  }
   drawNotifications(renderer, f, belowClock + m.digitH / 6);
 }
 
@@ -292,12 +311,16 @@ bool render(GfxRenderer& renderer) {
 
   face.hour = static_cast<uint8_t>(now.tm_hour);
   face.minute = static_cast<uint8_t>(now.tm_min);
+  face.shownMinutes = PhoneLink::localMinutes(now);
   face.use12h = SETTINGS.clockFormat == 1;
   const char* tz = getenv("TZ");
   snprintf(face.posixTz, sizeof(face.posixTz), "%s", tz ? tz : "");
   face.phoneSync = PhoneLink::isAvailable() && PhoneLink::isPaired();
   face.phoneFailures = 0;
   face.notificationCount = 0;
+  face.phoneBattery = -1;
+  face.shownMinutes = PhoneLink::localMinutes(now);
+  face.language = SETTINGS.language;
 
   drawFace(renderer, face);
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
@@ -309,7 +332,10 @@ bool isActive() { return face.magic == FACE_MAGIC; }
 
 void deactivate() { face.magic = 0; }
 
-void restoreTimezone() { halClock.setTimezone(face.posixTz); }
+void restoreLocale() {
+  halClock.setTimezone(face.posixTz);
+  I18N.setLanguage(static_cast<Language>(face.language));
+}
 
 bool needsRepaint(const struct tm& now) { return now.tm_hour != face.hour || now.tm_min != face.minute; }
 
@@ -328,6 +354,7 @@ void update(GfxRenderer& renderer, const struct tm& now) {
 
   face.hour = static_cast<uint8_t>(now.tm_hour);
   face.minute = static_cast<uint8_t>(now.tm_min);
+  face.shownMinutes = PhoneLink::localMinutes(now);
   renderer.clearScreen();
   drawFace(renderer, face);
   if (cleanRefresh) {
@@ -362,6 +389,10 @@ void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncR
   }
 
   bool changed = false;
+  if (result.phoneBattery >= 0 && result.phoneBattery != face.phoneBattery) {
+    face.phoneBattery = result.phoneBattery;
+    changed = true;
+  }
   if (result.gotNotifications &&
       (result.count != face.notificationCount ||
        memcmp(result.items, face.notifications, sizeof(PhoneLink::Notification) * result.count) != 0)) {
@@ -373,6 +404,7 @@ void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncR
   if (halClock.localTime(now, /*fresh=*/true) && needsRepaint(now)) {
     face.hour = static_cast<uint8_t>(now.tm_hour);
     face.minute = static_cast<uint8_t>(now.tm_min);
+    face.shownMinutes = PhoneLink::localMinutes(now);
     changed = true;
   }
   if (!changed) return;

@@ -553,7 +553,13 @@ Pair an iPhone once under **Settings -> System -> Clock -> Pair iPhone**: open *
 After that, each minute of Clock sleep the X3 reconnects to the iPhone for a few seconds:
 
 - The clock takes the iPhone's time and time zone, so it stays correct across travel and daylight-saving changes.
-- The four newest notifications on the iPhone are listed under the clock, with their title and first two lines. The list refreshes within seconds of each minute.
+- The four newest notifications on the iPhone are listed under the clock: the app and how long ago it arrived, the title and the first two lines. The list refreshes within seconds of each minute.
+- The iPhone's battery level is shown under the clock when the phone shares it.
+
+Under **Settings -> System -> Clock**:
+
+- **Notification Types** chooses what is fetched: **All**, **Messages & calls** (messages, email, calls and voicemail) or **Messages, calls & calendar**.
+- **iPhone Notifications** connects to the iPhone and lists its notifications while the screen is open. Select one with the Up/Down buttons and press **Dismiss** (Confirm) to clear it on the iPhone as well.
 
 If the iPhone is out of range, the clock keeps running from its own chip; after three missed syncs it only looks for the phone every five minutes. Syncing every minute adds noticeably to the battery use of Clock sleep.
 

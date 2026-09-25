@@ -13,8 +13,13 @@ namespace PhoneLink {
 constexpr int MAX_NOTIFICATIONS = 4;
 constexpr size_t TITLE_LEN = 32;    // UTF-8 bytes including NUL
 constexpr size_t MESSAGE_LEN = 96;  // UTF-8 bytes including NUL
+constexpr size_t APP_LEN = 24;      // app display name, UTF-8 bytes including NUL
 
 struct Notification {
+  uint32_t uid;             // ANCS id, used to dismiss it
+  uint32_t arrivedMinutes;  // phone's local time in minutes since 1970; 0 = unknown
+  uint8_t category;         // ANCS CategoryID
+  char app[APP_LEN];        // empty when the phone did not name the app
   char title[TITLE_LEN];
   char message[MESSAGE_LEN];
 };
@@ -27,7 +32,19 @@ struct SyncResult {
   bool gotNotifications = false;
   uint8_t count = 0;  // newest first
   Notification items[MAX_NOTIFICATIONS];
+  int8_t phoneBattery = -1;  // percent; -1 when the phone offers no Battery Service
 };
+
+// Which notification categories are fetched from the phone.
+enum class Filter : uint8_t { All, Messages, MessagesAndCalendar, Count };
+Filter filter();
+void setFilter(Filter f);
+
+// Local wall-clock time as minutes since 1970, the unit of arrivedMinutes.
+uint32_t localMinutes(const struct tm& wallClock);
+
+// Compact age ("now", "5m", "2h", "3d"); empty when the arrival time is unknown.
+void formatAge(char* buf, size_t size, uint32_t arrivedMinutes, uint32_t nowMinutes);
 
 // NimBLE is compiled in and this is an X3.
 bool isAvailable();
@@ -49,6 +66,18 @@ bool isPaired();
 // notifications, disconnects and shuts BLE down. Returns false when the phone
 // did not connect or no data arrived within timeoutMs.
 bool sync(SyncResult& out, uint32_t timeoutMs);
+
+// Live session for the notifications screen: stays connected, keeps the list
+// current and can dismiss notifications on the phone.
+enum class LiveState : uint8_t { Connecting, Ready, Failed };
+bool startLive();
+LiveState liveState();
+// Copies up to `max` notifications, newest first. `battery` gets the phone's
+// level or -1.
+int liveSnapshot(Notification* out, int max, int8_t& battery);
+// Clears the notification on the iPhone (the ANCS negative action).
+bool dismiss(uint32_t uid);
+void stopLive();
 
 enum class PairState : uint8_t { Idle, Advertising, Connected, Paired, Failed };
 

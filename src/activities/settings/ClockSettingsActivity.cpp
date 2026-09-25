@@ -11,6 +11,7 @@
 #include "ClockSyncActivity.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "PhoneNotificationsActivity.h"
 #include "PhonePairActivity.h"
 #include "TimezonePickerActivity.h"
 #include "components/UITheme.h"
@@ -26,12 +27,17 @@ enum MenuItem {
   ITEM_SHOW_ON_HOME,
   ITEM_SYNC,
   ITEM_PHONE,
+  ITEM_PHONE_FILTER,
+  ITEM_PHONE_NOTIFICATIONS,
 };
 
 const StrId menuNames[ClockSettingsActivity::ITEM_COUNT] = {
-    StrId::STR_TIMEZONE,        StrId::STR_CLOCK_DST,      StrId::STR_CLOCK_FORMAT,
-    StrId::STR_CLOCK_IN_HEADER, StrId::STR_CLOCK_SYNC_NOW, StrId::STR_PHONE_PAIR,
+    StrId::STR_TIMEZONE,       StrId::STR_CLOCK_DST,  StrId::STR_CLOCK_FORMAT, StrId::STR_CLOCK_IN_HEADER,
+    StrId::STR_CLOCK_SYNC_NOW, StrId::STR_PHONE_PAIR, StrId::STR_PHONE_FILTER, StrId::STR_PHONE_NOTIFICATIONS,
 };
+
+const StrId filterNames[static_cast<int>(PhoneLink::Filter::Count)] = {
+    StrId::STR_PHONE_FILTER_ALL, StrId::STR_PHONE_FILTER_MESSAGES, StrId::STR_PHONE_FILTER_MESSAGES_CALENDAR};
 
 const StrId dstNames[CrossPointSettings::CLOCK_DST_MODE_COUNT] = {StrId::STR_CLOCK_DST_AUTO, StrId::STR_STATE_ON,
                                                                   StrId::STR_STATE_OFF};
@@ -50,7 +56,9 @@ void ClockSettingsActivity::onEnter() {
 
 const char* ClockSettingsActivity::headerTitle() const { return tr(STR_CLOCK); }
 
-int ClockSettingsActivity::listCount() const { return PhoneLink::isAvailable() ? ITEM_COUNT : ITEM_COUNT - 1; }
+int ClockSettingsActivity::listCount() const {
+  return PhoneLink::isAvailable() ? ITEM_COUNT : ITEM_COUNT - PHONE_ITEM_COUNT;
+}
 
 void ClockSettingsActivity::activateIndex(const int index) {
   nav.selected = index;
@@ -87,6 +95,19 @@ void ClockSettingsActivity::activateIndex(const int index) {
         LOG_ERR("CLKSET", "OOM: PhonePairActivity");
       }
       return;
+    case ITEM_PHONE_FILTER:
+      PhoneLink::setFilter(static_cast<PhoneLink::Filter>((static_cast<int>(PhoneLink::filter()) + 1) %
+                                                          static_cast<int>(PhoneLink::Filter::Count)));
+      requestUpdate();
+      return;
+    case ITEM_PHONE_NOTIFICATIONS:
+      if (!PhoneLink::isPaired()) return;
+      if (auto activity = makeUniqueNoThrow<PhoneNotificationsActivity>(renderer, mappedInput)) {
+        startActivityForResult(std::move(activity), nullptr);
+      } else {
+        LOG_ERR("CLKSET", "OOM: PhoneNotificationsActivity");
+      }
+      return;
     default:
       return;
   }
@@ -114,6 +135,8 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
           ? syncTime_
           : tr(STR_NOT_SET);
   rowItems_[ITEM_PHONE].value = PhoneLink::isPaired() ? tr(STR_PHONE_PAIRED) : tr(STR_NOT_SET);
+  rowItems_[ITEM_PHONE_FILTER].value = I18N.get(filterNames[static_cast<int>(PhoneLink::filter())]);
+  rowItems_[ITEM_PHONE_NOTIFICATIONS].value = PhoneLink::isPaired() ? "" : tr(STR_NOT_SET);
 
   fui::ListProps props;
   props.items = rowItems_;

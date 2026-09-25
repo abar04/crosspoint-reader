@@ -318,7 +318,7 @@ static void serviceClockSleepWake() {
   if (!ClockSleepScreen::isActive()) return;
 
   halClock.begin();
-  ClockSleepScreen::restoreTimezone();
+  ClockSleepScreen::restoreLocale();
   struct tm now;
   if (!halClock.localTime(now, /*fresh=*/true)) {
     LOG_ERR("MAIN", "Clock sleep wake: RTC read failed, booting normally");

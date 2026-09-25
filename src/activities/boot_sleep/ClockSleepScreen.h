@@ -26,9 +26,9 @@ bool isActive();
 // Ends the clock sleep cycle; call before painting any other sleep screen.
 void deactivate();
 
-// Restores the timezone captured by render(), for timer wakes that skip
-// loading settings from SD.
-void restoreTimezone();
+// Restores the timezone and UI language captured by render(), for timer
+// wakes that skip loading settings from SD.
+void restoreLocale();
 
 // True when `now` shows a different minute than the face on the glass.
 bool needsRepaint(const struct tm& now);

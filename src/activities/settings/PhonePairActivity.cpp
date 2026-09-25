@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "MappedInputManager.h"
+#include "PhoneUi.h"
 #include "SilentRestart.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -91,33 +92,8 @@ void PhonePairActivity::render(RenderLock&&) {
       break;
     case PhoneLink::PairState::Failed: {
       renderer.drawCenteredText(UI_12_FONT_ID, midY - 20, tr(STR_PHONE_PAIR_FAILED), true, EpdFontFamily::BOLD);
-      // Diagnostic detail, word-wrapped to the screen width.
-      char detail[176];
-      snprintf(detail, sizeof(detail), "%s", timedOut ? "timed out waiting for the iPhone" : PhoneLink::lastError());
-      const int maxWidth = pageWidth - 20;
-      int y = midY + 10;
-      const char* rest = detail;
-      char line[sizeof(detail)];
-      for (int row = 0; row < 5 && *rest != '\0'; row++) {
-        // Longest run of whole words that fits; a single overlong word is kept.
-        size_t best = 0;
-        size_t from = 0;
-        while (true) {
-          const char* space = strchr(rest + from, ' ');
-          const size_t candidate = space ? static_cast<size_t>(space - rest) : strlen(rest);
-          memcpy(line, rest, candidate);
-          line[candidate] = '\0';
-          if (best > 0 && renderer.getTextWidth(UI_10_FONT_ID, line) > maxWidth) break;
-          best = candidate;
-          if (!space) break;
-          from = candidate + 1;
-        }
-        line[best] = '\0';
-        renderer.drawCenteredText(UI_10_FONT_ID, y, line);
-        y += lineH;
-        rest += best;
-        while (*rest == ' ') rest++;
-      }
+      drawWrappedCentered(renderer, UI_10_FONT_ID, midY + 10,
+                          timedOut ? "timed out waiting for the iPhone" : PhoneLink::lastError(), pageWidth - 20, 5);
       break;
     }
     default: {
