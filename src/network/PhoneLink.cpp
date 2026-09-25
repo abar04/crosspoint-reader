@@ -36,6 +36,7 @@ constexpr char NVS_NAMESPACE[] = "cpphone";
 constexpr char NVS_PAIRED_KEY[] = "paired";
 constexpr char NVS_ENABLED_KEY[] = "enabled";
 constexpr char NVS_FILTER_KEY[] = "filter";
+constexpr char NVS_QUIET_KEY[] = "quiet";
 bool bleMemoryKept = false;
 
 uint8_t readFlag(const char* key) {
@@ -80,6 +81,8 @@ PairState pairState() { return PairState::Idle; }
 void stopPairing() {}
 Filter filter() { return Filter::All; }
 void setFilter(Filter) {}
+uint8_t quietHours() { return 0; }
+void setQuietHours(uint8_t) {}
 bool startLive() { return false; }
 LiveState liveState() { return LiveState::Failed; }
 int liveSnapshot(Notification*, int, int8_t& battery) {
@@ -1028,6 +1031,13 @@ Filter filter() {
 
 void setFilter(const Filter f) { writeFlag(NVS_FILTER_KEY, static_cast<uint8_t>(f)); }
 
+uint8_t quietHours() {
+  const uint8_t q = readFlag(NVS_QUIET_KEY);
+  return q < QUIET_HOURS_COUNT ? q : 0;
+}
+
+void setQuietHours(const uint8_t index) { writeFlag(NVS_QUIET_KEY, index < QUIET_HOURS_COUNT ? index : 0); }
+
 bool startLive() {
   if (!isAvailable()) return false;
   return begin(Mode::Live, nullptr);
@@ -1058,6 +1068,26 @@ bool dismiss(const uint32_t uid) {
 void stopLive() { end(); }
 
 #endif
+
+namespace {
+struct QuietWindow {
+  uint8_t start;  // first quiet hour
+  uint8_t end;    // first hour syncing resumes
+  const char* label;
+};
+constexpr QuietWindow QUIET_WINDOWS[QUIET_HOURS_COUNT] = {
+    {0, 0, nullptr}, {22, 7, "22:00-07:00"}, {23, 7, "23:00-07:00"}, {0, 6, "00:00-06:00"}};
+}  // namespace
+
+const char* quietHoursLabel(const uint8_t index) {
+  return index < QUIET_HOURS_COUNT ? QUIET_WINDOWS[index].label : nullptr;
+}
+
+bool inQuietHours(const uint8_t index, const int hour) {
+  if (index == 0 || index >= QUIET_HOURS_COUNT) return false;
+  const QuietWindow& w = QUIET_WINDOWS[index];
+  return w.start < w.end ? (hour >= w.start && hour < w.end) : (hour >= w.start || hour < w.end);
+}
 
 uint32_t localMinutes(const struct tm& wallClock) {
   // Days-from-civil (Howard Hinnant), in minutes.

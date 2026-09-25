@@ -40,6 +40,14 @@ enum class Filter : uint8_t { All, Messages, MessagesAndCalendar, Count };
 Filter filter();
 void setFilter(Filter f);
 
+// Hours when Clock sleep skips the phone sync (the clock keeps running).
+// Index 0 is Off; the rest are fixed windows, see quietHoursLabel().
+constexpr uint8_t QUIET_HOURS_COUNT = 4;
+uint8_t quietHours();
+void setQuietHours(uint8_t index);
+const char* quietHoursLabel(uint8_t index);  // "22:00-07:00"; nullptr for Off
+bool inQuietHours(uint8_t index, int hour);
+
 // Local wall-clock time as minutes since 1970, the unit of arrivedMinutes.
 uint32_t localMinutes(const struct tm& wallClock);
 

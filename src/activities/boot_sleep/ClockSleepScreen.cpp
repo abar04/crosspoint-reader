@@ -4,6 +4,7 @@
 #include <HalClock.h>
 #include <HalDisplay.h>
 #include <HalGPIO.h>
+#include <HalPowerManager.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <esp_attr.h>
@@ -33,6 +34,16 @@ constexpr int PHONE_BACKOFF_MINUTES = 5;
 // Seconds of RTC drift from the phone's time before the RTC is rewritten.
 constexpr int PHONE_TIME_TOLERANCE_S = 2;
 constexpr int MESSAGE_LINES = 2;
+// Show when the phone was last reached once the last good sync is this old.
+constexpr uint32_t STALE_SYNC_MINUTES = 5;
+
+constexpr StrId WEEKDAY_NAMES[7] = {StrId::STR_DAY_SUNDAY,    StrId::STR_DAY_MONDAY,   StrId::STR_DAY_TUESDAY,
+                                    StrId::STR_DAY_WEDNESDAY, StrId::STR_DAY_THURSDAY, StrId::STR_DAY_FRIDAY,
+                                    StrId::STR_DAY_SATURDAY};
+constexpr StrId MONTH_NAMES[12] = {StrId::STR_MONTH_JANUARY, StrId::STR_MONTH_FEBRUARY, StrId::STR_MONTH_MARCH,
+                                   StrId::STR_MONTH_APRIL,   StrId::STR_MONTH_MAY,      StrId::STR_MONTH_JUNE,
+                                   StrId::STR_MONTH_JULY,    StrId::STR_MONTH_AUGUST,   StrId::STR_MONTH_SEPTEMBER,
+                                   StrId::STR_MONTH_OCTOBER, StrId::STR_MONTH_NOVEMBER, StrId::STR_MONTH_DECEMBER};
 
 // The face on the glass. RTC_DATA_ATTR memory survives deep sleep and is
 // re-initialized (magic cleared) by any other reset.
@@ -46,9 +57,12 @@ struct Face {
   uint8_t phoneFailures;  // consecutive syncs the phone missed
   uint8_t notificationCount;
   PhoneLink::Notification notifications[PhoneLink::MAX_NOTIFICATIONS];
-  int8_t phoneBattery;    // percent, -1 = unknown
-  uint32_t shownMinutes;  // face time as local minutes since 1970, for ages
-  uint8_t language;       // UI language, restored on timer wakes
+  int8_t phoneBattery;       // percent, -1 = unknown
+  uint32_t shownMinutes;     // face time as local minutes since 1970, for ages
+  uint8_t language;          // UI language, restored on timer wakes
+  uint8_t deviceBattery;     // this device's battery percent
+  uint8_t quietHours;        // PhoneLink quiet-hours index captured at sleep
+  uint32_t lastSyncMinutes;  // local minutes of the last good phone sync; 0 = none yet
 };
 RTC_DATA_ATTR Face face;
 
@@ -219,6 +233,68 @@ void drawNotifications(const GfxRenderer& renderer, const Face& f, int y) {
   }
 }
 
+// Date, battery and phone-sync lines under the digits. Returns the y below them.
+int drawStatus(const GfxRenderer& renderer, const Face& f, int y) {
+  const int dateH = renderer.getLineHeight(UI_12_FONT_ID);
+  const int smallH = renderer.getLineHeight(UI_10_FONT_ID);
+
+  // Days-to-civil (Howard Hinnant) for the face's local date.
+  const long days = static_cast<long>(f.shownMinutes / 1440);
+  if (f.shownMinutes != 0) {
+    const long z = days + 719468L;
+    const long era = (z >= 0 ? z : z - 146096L) / 146097L;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097L);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    const unsigned day = doy - (153 * mp + 2) / 5 + 1;
+    const unsigned month = mp < 10 ? mp + 3 : mp - 9;
+    const int weekday = static_cast<int>((days + 4) % 7);  // 1970-01-01 was a Thursday
+    char date[64];
+    snprintf(date, sizeof(date), "%s %u %s", I18N.get(WEEKDAY_NAMES[weekday]), day, I18N.get(MONTH_NAMES[month - 1]));
+    renderer.drawCenteredText(UI_12_FONT_ID, y, date, true, EpdFontFamily::BOLD);
+    y += dateH + 4;
+  }
+
+  char status[64] = "";
+  int len = 0;
+  if (f.deviceBattery <= 100) {
+    len += snprintf(status + len, sizeof(status) - len, tr(STR_DEVICE_BATTERY), static_cast<int>(f.deviceBattery));
+  }
+  if (f.phoneSync && f.phoneBattery >= 0 && len < static_cast<int>(sizeof(status))) {
+    if (len > 0) len += snprintf(status + len, sizeof(status) - len, " \xC2\xB7 ");
+    snprintf(status + len, sizeof(status) - len, tr(STR_PHONE_BATTERY), static_cast<int>(f.phoneBattery));
+  }
+  if (status[0] != '\0') {
+    renderer.drawCenteredText(UI_10_FONT_ID, y, status);
+    y += smallH;
+  }
+
+  if (f.phoneSync) {
+    const bool neverSynced = f.lastSyncMinutes == 0;
+    const bool stale = neverSynced ? f.phoneFailures >= 2 : f.shownMinutes - f.lastSyncMinutes >= STALE_SYNC_MINUTES;
+    if (stale) {
+      char line[64];
+      if (neverSynced) {
+        snprintf(line, sizeof(line), "%s", tr(STR_PHONE_NOT_FOUND));
+      } else {
+        const int hour = static_cast<int>(f.lastSyncMinutes / 60 % 24);
+        const int minute = static_cast<int>(f.lastSyncMinutes % 60);
+        char when[12];
+        if (f.use12h) {
+          snprintf(when, sizeof(when), "%d:%02d %s", hour % 12 == 0 ? 12 : hour % 12, minute, HalClock::meridiem(hour));
+        } else {
+          snprintf(when, sizeof(when), "%02d:%02d", hour, minute);
+        }
+        snprintf(line, sizeof(line), tr(STR_PHONE_LAST_SYNC), when);
+      }
+      renderer.drawCenteredText(UI_10_FONT_ID, y, line);
+      y += smallH;
+    }
+  }
+  return y;
+}
+
 // Deterministic for a given face: update() redraws the previous minute to
 // rebuild the controller baseline, so the pixels must match the earlier paint.
 // With notifications the clock moves to the top and the list fills the rest.
@@ -259,13 +335,8 @@ void drawFace(const GfxRenderer& renderer, const Face& f) {
     renderer.drawText(UI_12_FONT_ID, markerX, y + m.digitH + m.digitH / 10, marker, true, EpdFontFamily::BOLD);
     belowClock += m.digitH / 10 + renderer.getLineHeight(UI_12_FONT_ID);
   }
-  if (f.phoneSync && f.phoneBattery >= 0) {
-    char battery[32];
-    snprintf(battery, sizeof(battery), tr(STR_PHONE_BATTERY), static_cast<int>(f.phoneBattery));
-    belowClock += m.digitH / 10;
-    renderer.drawCenteredText(UI_10_FONT_ID, belowClock, battery);
-    belowClock += renderer.getLineHeight(UI_10_FONT_ID);
-  }
+  belowClock += m.digitH / 10;
+  belowClock = drawStatus(renderer, f, belowClock);
   drawNotifications(renderer, f, belowClock + m.digitH / 6);
 }
 
@@ -321,6 +392,9 @@ bool render(GfxRenderer& renderer) {
   face.phoneBattery = -1;
   face.shownMinutes = PhoneLink::localMinutes(now);
   face.language = SETTINGS.language;
+  face.deviceBattery = static_cast<uint8_t>(std::min<uint16_t>(powerManager.getBatteryPercentage(), 100));
+  face.quietHours = PhoneLink::quietHours();
+  face.lastSyncMinutes = 0;
 
   drawFace(renderer, face);
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
@@ -355,6 +429,7 @@ void update(GfxRenderer& renderer, const struct tm& now) {
   face.hour = static_cast<uint8_t>(now.tm_hour);
   face.minute = static_cast<uint8_t>(now.tm_min);
   face.shownMinutes = PhoneLink::localMinutes(now);
+  face.deviceBattery = static_cast<uint8_t>(std::min<uint16_t>(powerManager.getBatteryPercentage(), 100));
   renderer.clearScreen();
   drawFace(renderer, face);
   if (cleanRefresh) {
@@ -365,12 +440,19 @@ void update(GfxRenderer& renderer, const struct tm& now) {
 }
 
 bool phoneSyncDue(const struct tm& now) {
-  return face.phoneSync && (face.phoneFailures < PHONE_BACKOFF_AFTER || now.tm_min % PHONE_BACKOFF_MINUTES == 0);
+  return face.phoneSync && !PhoneLink::inQuietHours(face.quietHours, now.tm_hour) &&
+         (face.phoneFailures < PHONE_BACKOFF_AFTER || now.tm_min % PHONE_BACKOFF_MINUTES == 0);
 }
 
 void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncResult& result) {
   if (!ok) {
     if (face.phoneFailures < UINT8_MAX) face.phoneFailures++;
+    // The failure count can make "iPhone not found" appear.
+    if (face.lastSyncMinutes == 0 && face.phoneFailures == 2) {
+      renderer.clearScreen();
+      drawFace(renderer, face);
+      renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+    }
     return;
   }
   face.phoneFailures = 0;
@@ -401,7 +483,14 @@ void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncR
     changed = true;
   }
   struct tm now;
-  if (halClock.localTime(now, /*fresh=*/true) && needsRepaint(now)) {
+  const bool haveNow = halClock.localTime(now, /*fresh=*/true);
+  if (haveNow) {
+    const uint32_t synced = PhoneLink::localMinutes(now);
+    const bool wasStale = face.lastSyncMinutes == 0 || face.shownMinutes - face.lastSyncMinutes >= STALE_SYNC_MINUTES;
+    face.lastSyncMinutes = synced;
+    if (wasStale) changed = true;
+  }
+  if (haveNow && needsRepaint(now)) {
     face.hour = static_cast<uint8_t>(now.tm_hour);
     face.minute = static_cast<uint8_t>(now.tm_min);
     face.shownMinutes = PhoneLink::localMinutes(now);

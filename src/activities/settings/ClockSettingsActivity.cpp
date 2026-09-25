@@ -28,12 +28,14 @@ enum MenuItem {
   ITEM_SYNC,
   ITEM_PHONE,
   ITEM_PHONE_FILTER,
+  ITEM_PHONE_QUIET_HOURS,
   ITEM_PHONE_NOTIFICATIONS,
 };
 
 const StrId menuNames[ClockSettingsActivity::ITEM_COUNT] = {
-    StrId::STR_TIMEZONE,       StrId::STR_CLOCK_DST,  StrId::STR_CLOCK_FORMAT, StrId::STR_CLOCK_IN_HEADER,
-    StrId::STR_CLOCK_SYNC_NOW, StrId::STR_PHONE_PAIR, StrId::STR_PHONE_FILTER, StrId::STR_PHONE_NOTIFICATIONS,
+    StrId::STR_TIMEZONE,        StrId::STR_CLOCK_DST,         StrId::STR_CLOCK_FORMAT,
+    StrId::STR_CLOCK_IN_HEADER, StrId::STR_CLOCK_SYNC_NOW,    StrId::STR_PHONE_PAIR,
+    StrId::STR_PHONE_FILTER,    StrId::STR_PHONE_QUIET_HOURS, StrId::STR_PHONE_NOTIFICATIONS,
 };
 
 const StrId filterNames[static_cast<int>(PhoneLink::Filter::Count)] = {
@@ -100,6 +102,10 @@ void ClockSettingsActivity::activateIndex(const int index) {
                                                           static_cast<int>(PhoneLink::Filter::Count)));
       requestUpdate();
       return;
+    case ITEM_PHONE_QUIET_HOURS:
+      PhoneLink::setQuietHours((PhoneLink::quietHours() + 1) % PhoneLink::QUIET_HOURS_COUNT);
+      requestUpdate();
+      return;
     case ITEM_PHONE_NOTIFICATIONS:
       if (!PhoneLink::isPaired()) return;
       if (auto activity = makeUniqueNoThrow<PhoneNotificationsActivity>(renderer, mappedInput)) {
@@ -136,6 +142,8 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
           : tr(STR_NOT_SET);
   rowItems_[ITEM_PHONE].value = PhoneLink::isPaired() ? tr(STR_PHONE_PAIRED) : tr(STR_NOT_SET);
   rowItems_[ITEM_PHONE_FILTER].value = I18N.get(filterNames[static_cast<int>(PhoneLink::filter())]);
+  const char* quiet = PhoneLink::quietHoursLabel(PhoneLink::quietHours());
+  rowItems_[ITEM_PHONE_QUIET_HOURS].value = quiet ? quiet : tr(STR_STATE_OFF);
   rowItems_[ITEM_PHONE_NOTIFICATIONS].value = PhoneLink::isPaired() ? "" : tr(STR_NOT_SET);
 
   fui::ListProps props;
