@@ -11,6 +11,7 @@
 #include "ClockSyncActivity.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "PhonePairActivity.h"
 #include "TimezonePickerActivity.h"
 #include "components/UITheme.h"
 #include "util/Timezones.h"
@@ -24,11 +25,12 @@ enum MenuItem {
   ITEM_FORMAT,
   ITEM_SHOW_ON_HOME,
   ITEM_SYNC,
+  ITEM_PHONE,
 };
 
 const StrId menuNames[ClockSettingsActivity::ITEM_COUNT] = {
     StrId::STR_TIMEZONE,        StrId::STR_CLOCK_DST,      StrId::STR_CLOCK_FORMAT,
-    StrId::STR_CLOCK_IN_HEADER, StrId::STR_CLOCK_SYNC_NOW,
+    StrId::STR_CLOCK_IN_HEADER, StrId::STR_CLOCK_SYNC_NOW, StrId::STR_PHONE_PAIR,
 };
 
 const StrId dstNames[CrossPointSettings::CLOCK_DST_MODE_COUNT] = {StrId::STR_CLOCK_DST_AUTO, StrId::STR_STATE_ON,
@@ -47,6 +49,8 @@ void ClockSettingsActivity::onEnter() {
 }
 
 const char* ClockSettingsActivity::headerTitle() const { return tr(STR_CLOCK); }
+
+int ClockSettingsActivity::listCount() const { return PhoneLink::isAvailable() ? ITEM_COUNT : ITEM_COUNT - 1; }
 
 void ClockSettingsActivity::activateIndex(const int index) {
   nav.selected = index;
@@ -76,6 +80,13 @@ void ClockSettingsActivity::activateIndex(const int index) {
         LOG_ERR("CLKSET", "OOM: ClockSyncActivity");
       }
       return;
+    case ITEM_PHONE:
+      if (auto activity = makeUniqueNoThrow<PhonePairActivity>(renderer, mappedInput)) {
+        startActivityForResult(std::move(activity), nullptr);
+      } else {
+        LOG_ERR("CLKSET", "OOM: PhonePairActivity");
+      }
+      return;
     default:
       return;
   }
@@ -102,10 +113,11 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
       SETTINGS.clockHasBeenSynced && halClock.formatTime(syncTime_, sizeof(syncTime_), SETTINGS.clockFormat == 1)
           ? syncTime_
           : tr(STR_NOT_SET);
+  rowItems_[ITEM_PHONE].value = PhoneLink::isPaired() ? tr(STR_PHONE_PAIRED) : tr(STR_NOT_SET);
 
   fui::ListProps props;
   props.items = rowItems_;
-  props.count = ITEM_COUNT;
+  props.count = listCount();
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
   props.valueInset = 8;

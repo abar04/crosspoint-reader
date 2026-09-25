@@ -2,6 +2,8 @@
 
 #include <ctime>
 
+#include "network/PhoneLink.h"
+
 class GfxRenderer;
 
 // "Clock" sleep screen: a large HH:MM face that a deep-sleep timer wake
@@ -35,6 +37,14 @@ bool needsRepaint(const struct tm& now);
 // Rebuilds the controller baseline from the previous face and repaints only
 // the change; the first paint of each hour is a clean refresh instead.
 void update(GfxRenderer& renderer, const struct tm& now);
+
+// True when this timer wake should sync with the paired iPhone. After repeated
+// misses it only tries every few minutes to spare the battery.
+bool phoneSyncDue(const struct tm& now);
+
+// Applies an iPhone sync after update(): corrects the RTC and timezone from the
+// phone and repaints if the notifications (or the minute) changed.
+void applyPhoneSync(GfxRenderer& renderer, bool ok, const PhoneLink::SyncResult& result);
 
 // Arms the deep-sleep wake timer for just after the next minute boundary, or
 // right away if the minute already turned. Returns true when armed; the

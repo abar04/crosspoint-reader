@@ -15,6 +15,7 @@
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SPI.h>
 #include <VectorFontSupport.h>
 #include <WiFi.h>
@@ -37,6 +38,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "network/PhoneLink.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
@@ -305,6 +307,10 @@ void enterDeepSleep(bool fromTimeout = false) {
   powerManager.startDeepSleep(gpio, clockTimerArmed);
 }
 
+// Covers the iPhone reconnecting to our advertising plus reading its time and
+// notifications.
+constexpr uint32_t PHONE_SYNC_TIMEOUT_MS = 10000;
+
 // Timer wake armed by the Clock sleep screen: repaint the minute and go
 // straight back to sleep without mounting SD, loading settings or starting the
 // UI. Returns only when the wake can't be serviced; setup() then boots normally.
@@ -323,8 +329,19 @@ static void serviceClockSleepWake() {
   if (ClockSleepScreen::needsRepaint(now)) {
     display.begin(/*seamless=*/true);
     renderer.begin();
+    renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
     renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
     ClockSleepScreen::update(renderer, now);
+    // The time is painted first so the minute lands on schedule; the phone
+    // sync then corrects the RTC and refreshes the notification list.
+    if (ClockSleepScreen::phoneSyncDue(now)) {
+      if (auto phone = makeUniqueNoThrow<PhoneLink::SyncResult>()) {
+        const bool ok = PhoneLink::sync(*phone, PHONE_SYNC_TIMEOUT_MS);
+        ClockSleepScreen::applyPhoneSync(renderer, ok, *phone);
+      } else {
+        LOG_ERR("MAIN", "OOM: phone sync result");
+      }
+    }
     display.deepSleep();
   }
 

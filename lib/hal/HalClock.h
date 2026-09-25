@@ -44,6 +44,10 @@ class HalClock {
   // Returns false if RTC is not available.
   bool formatTime(char* buf, size_t bufSize, bool use12Hour = false) const;
 
+  // Rewrites the RTC with `utc` unless it is already within toleranceSeconds.
+  // Returns false if the RTC could not be written.
+  bool adjustTo(time_t utc, int toleranceSeconds) const;
+
   // 12-hour clock marker ("AM"/"PM") for a 0-23 hour.
   static const char* meridiem(int hour24) { return hour24 >= 12 ? "PM" : "AM"; }
 
