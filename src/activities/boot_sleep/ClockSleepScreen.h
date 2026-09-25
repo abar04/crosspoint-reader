@@ -14,7 +14,8 @@ namespace ClockSleepScreen {
 bool isSupported();
 
 // Paints the current time with a clean refresh and starts a clock sleep cycle.
-// Returns false (nothing painted) when unsupported or the RTC can't be read.
+// Without a valid RTC time it paints "--:--" and a "not set" note instead,
+// with no cycle. Returns false (nothing painted) when unsupported.
 bool render(GfxRenderer& renderer);
 
 // True while the panel shows a face painted by render() or update().

@@ -4,6 +4,7 @@
 #include <HalClock.h>
 #include <HalDisplay.h>
 #include <HalGPIO.h>
+#include <I18n.h>
 #include <Logging.h>
 #include <esp_attr.h>
 #include <esp_sleep.h>
@@ -99,8 +100,7 @@ void drawVerticalSegment(const GfxRenderer& renderer, const int x, const int y0,
   }
 }
 
-void drawDigit(const GfxRenderer& renderer, const Metrics& m, const int x, const int y, const int digit) {
-  const uint8_t segments = DIGIT_SEGMENTS[digit];
+void drawSegments(const GfxRenderer& renderer, const Metrics& m, const int x, const int y, const uint8_t segments) {
   const int left = x + m.half;
   const int right = x + m.digitW - 1 - m.half;
   const int top = y + m.half;
@@ -114,6 +114,18 @@ void drawDigit(const GfxRenderer& renderer, const Metrics& m, const int x, const
   if (segments & SEG_B) drawVerticalSegment(renderer, right, top + m.gap, middle - m.gap, m.half);
   if (segments & SEG_E) drawVerticalSegment(renderer, left, middle + m.gap, bottom - m.gap, m.half);
   if (segments & SEG_C) drawVerticalSegment(renderer, right, middle + m.gap, bottom - m.gap, m.half);
+}
+
+void drawDigit(const GfxRenderer& renderer, const Metrics& m, const int x, const int y, const int digit) {
+  drawSegments(renderer, m, x, y, DIGIT_SEGMENTS[digit]);
+}
+
+void drawColon(const GfxRenderer& renderer, const Metrics& m, const int x, const int y) {
+  const int dot = 2 * m.half + 1;
+  const int dotX = x + (m.colonW - dot) / 2;
+  const int middle = y + m.digitH / 2;
+  renderer.fillRect(dotX, middle - m.digitH / 5 - m.half, dot, dot);
+  renderer.fillRect(dotX, middle + m.digitH / 5 - m.half, dot, dot);
 }
 
 // Deterministic for a given face: update() redraws the previous minute to
@@ -141,11 +153,7 @@ void drawFace(const GfxRenderer& renderer, const Face& f) {
   drawDigit(renderer, m, x, y, hour % 10);
   x += m.digitW;
 
-  const int dot = 2 * m.half + 1;
-  const int dotX = x + (m.colonW - dot) / 2;
-  const int middle = y + m.digitH / 2;
-  renderer.fillRect(dotX, middle - m.digitH / 5 - m.half, dot, dot);
-  renderer.fillRect(dotX, middle + m.digitH / 5 - m.half, dot, dot);
+  drawColon(renderer, m, x, y);
   x += m.colonW;
 
   drawDigit(renderer, m, x, y, f.minute / 10);
@@ -159,6 +167,27 @@ void drawFace(const GfxRenderer& renderer, const Face& f) {
   }
 }
 
+// "--:--" with a note, for an RTC that has no valid time (never set, or its
+// backup supply ran out).
+void drawUnsetFace(const GfxRenderer& renderer) {
+  const Metrics m = metricsFor(renderer);
+  const int pairW = 2 * m.digitW + m.pairGap;
+  int x = (renderer.getScreenWidth() - (2 * pairW + m.colonW)) / 2;
+  const int y = (renderer.getScreenHeight() - m.digitH) / 2;
+  for (int pair = 0; pair < 2; pair++) {
+    drawSegments(renderer, m, x, y, SEG_G);
+    drawSegments(renderer, m, x + m.digitW + m.pairGap, y, SEG_G);
+    x += pairW;
+    if (pair == 0) {
+      drawColon(renderer, m, x, y);
+      x += m.colonW;
+    }
+  }
+  char note[64];
+  snprintf(note, sizeof(note), "%s: %s", tr(STR_CLOCK), tr(STR_NOT_SET));
+  renderer.drawCenteredText(UI_12_FONT_ID, y + m.digitH + m.digitH / 5, note, true, EpdFontFamily::BOLD);
+}
+
 }  // namespace
 
 bool isSupported() { return gpio.deviceIsX3() && halClock.isAvailable(); }
@@ -166,10 +195,16 @@ bool isSupported() { return gpio.deviceIsX3() && halClock.isAvailable(); }
 bool render(GfxRenderer& renderer) {
   if (!isSupported()) return false;
 
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  renderer.clearScreen();
+
   struct tm now;
   if (!halClock.localTime(now, /*fresh=*/true)) {
-    LOG_ERR("CLK", "Clock sleep screen: RTC read failed");
-    return false;
+    // No wake timer: there is no time to keep updated.
+    LOG_ERR("CLK", "Clock sleep screen: RTC has no valid time");
+    drawUnsetFace(renderer);
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    return true;
   }
 
   face.hour = static_cast<uint8_t>(now.tm_hour);
@@ -178,8 +213,6 @@ bool render(GfxRenderer& renderer) {
   const char* tz = getenv("TZ");
   snprintf(face.posixTz, sizeof(face.posixTz), "%s", tz ? tz : "");
 
-  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
-  renderer.clearScreen();
   drawFace(renderer, face);
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
   face.magic = FACE_MAGIC;

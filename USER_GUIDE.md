@@ -538,11 +538,11 @@ The **Sleep Screen** setting controls what is displayed when the device goes to 
 | **Cover + Custom** | The cover of the currently open book, shown only while actively reading. Falls back to **Custom** behavior when not reading. |
 | **Transparent**    | A BMP or PNG overlay drawn over the current screen. Supports PNG and 32-bit BGRA alpha transparency, and treats white as transparent in regular BMPs. Falls back to **Dark** if no valid overlay image is found. |
 | **None**           | A blank screen.                                                                                                              |
-| **Clock** (X3 only) | The current time in large digits, updated every minute while the device sleeps (see below). Falls back to **Dark** if the clock can't be read. |
+| **Clock** (X3 only) | The current time in large digits, updated every minute while the device sleeps (see below). Shows `--:--` and "Clock: Not Set" if the clock has no valid time. |
 
 #### Clock
 
-The **Clock** sleep screen is available on the X3, which has a battery-backed real-time clock. The device wakes briefly once a minute to redraw the digits and goes straight back to sleep, without loading books or the SD card. It uses the timezone and 12/24-hour format from **Settings -> System -> Clock**; set the time there with **Sync Clock Now** first. The first update of each hour refreshes the whole screen to clear ghosting.
+The **Clock** sleep screen is available on the X3, which has a battery-backed real-time clock. The device wakes briefly once a minute to redraw the digits and goes straight back to sleep, without loading books or the SD card. It uses the timezone and 12/24-hour format from **Settings -> System -> Clock**; set the time there with **Sync Clock Now** first. Until the clock has a valid time, the sleep screen shows `--:--` and "Clock: Not Set" and does not update. The first update of each hour refreshes the whole screen to clear ghosting.
 
 Waking once a minute uses more battery than the other sleep screens.
 
