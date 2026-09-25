@@ -17,6 +17,7 @@
 
 #if PHONE_LINK_ENABLED
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <host/ble_hs.h>
@@ -175,7 +176,27 @@ class SessionLock {
 void setPairedFlag(const bool paired) { writeFlag(NVS_PAIRED_KEY, paired ? 1 : 0); }
 
 // Last failure, shown on the pairing screen for diagnosis.
-char lastErrorText[80] = "";
+char lastErrorText[160] = "";
+
+// ESP-IDF reports most controller init failures as ESP_ERR_NO_MEM; its own
+// error log line carries the real reason, so keep the last one seen.
+char idfErrorLine[72] = "";
+vprintf_like_t previousLogger = nullptr;
+
+int captureIdfErrors(const char* fmt, va_list args) {
+  char line[96];
+  va_list copy;
+  va_copy(copy, args);
+  vsnprintf(line, sizeof(line), fmt, copy);
+  va_end(copy);
+  if (const char* e = strstr(line, "E (")) {
+    snprintf(idfErrorLine, sizeof(idfErrorLine), "%s", e);
+    for (char* p = idfErrorLine; *p; p++) {
+      if (*p == '\n' || *p == '\r' || *p == '\033') *p = ' ';
+    }
+  }
+  return previousLogger ? previousLogger(fmt, args) : 0;
+}
 
 void setError(const char* fmt, ...) {
   va_list args;
@@ -678,11 +699,19 @@ bool begin(const Mode mode, SyncResult* out) {
   session->conn = BLE_HS_CONN_HANDLE_NONE;
   session->pairState = PairState::Idle;
 
+  idfErrorLine[0] = '\0';
+  previousLogger = esp_log_set_vprintf(captureIdfErrors);
   const esp_err_t err = nimble_port_init();
+  esp_log_set_vprintf(previousLogger);
   if (err != ESP_OK) {
     setError("NimBLE init failed: %s (0x%x), heap free %u, largest %u", esp_err_to_name(err),
              static_cast<unsigned>(err), static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    if (idfErrorLine[0] != '\0') {
+      const size_t used = strlen(lastErrorText);
+      snprintf(lastErrorText + used, sizeof(lastErrorText) - used, " | %s", idfErrorLine);
+      LOG_ERR("BLE", "Phone link: %s", idfErrorLine);
+    }
     vSemaphoreDelete(session->lock);
     delete session;
     session = nullptr;
