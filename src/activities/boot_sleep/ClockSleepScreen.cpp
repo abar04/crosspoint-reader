@@ -251,18 +251,19 @@ void update(GfxRenderer& renderer, const struct tm& now) {
   }
 }
 
-void armWakeTimer() {
-  if (!isActive()) return;
+bool armWakeTimer() {
+  if (!isActive()) return false;
 
   struct tm now;
   if (!halClock.localTime(now, /*fresh=*/true)) {
     LOG_ERR("CLK", "Clock sleep screen: RTC read failed, not arming wake timer");
-    return;
+    return false;
   }
   const uint64_t untilNextMinuteUs = needsRepaint(now) ? 0 : static_cast<uint64_t>(60 - now.tm_sec) * US_PER_SECOND;
   const uint64_t delayUs = untilNextMinuteUs + WAKE_MARGIN_US;
   esp_sleep_enable_timer_wakeup(delayUs);
   LOG_DBG("CLK", "Clock sleep screen: next wake in %lu ms", static_cast<unsigned long>(delayUs / 1000));
+  return true;
 }
 
 }  // namespace ClockSleepScreen

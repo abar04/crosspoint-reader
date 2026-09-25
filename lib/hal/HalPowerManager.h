@@ -40,7 +40,9 @@ class HalPowerManager {
 
   // Setup wake up GPIO and enter deep sleep
   // Should be called inside main loop() to handle the currentLockMode
-  void startDeepSleep(HalGPIO& gpio) const;
+  // keepBatteryPower: skip the Xteink GPIO13 battery power-off so an armed
+  // wake timer can fire on battery (the SD card stays powered as well).
+  void startDeepSleep(HalGPIO& gpio, bool keepBatteryPower = false) const;
 
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;

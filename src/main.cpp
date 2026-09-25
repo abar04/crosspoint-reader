@@ -299,10 +299,10 @@ void enterDeepSleep(bool fromTimeout = false) {
   halTiltSensor.deepSleep();
   display.deepSleep();
   Storage.prepareForDeepSleep();
-  ClockSleepScreen::armWakeTimer();
+  const bool clockTimerArmed = ClockSleepScreen::armWakeTimer();
   LOG_DBG("MAIN", "Entering deep sleep");
 
-  powerManager.startDeepSleep(gpio);
+  powerManager.startDeepSleep(gpio, clockTimerArmed);
 }
 
 // Timer wake armed by the Clock sleep screen: repaint the minute and go
@@ -328,8 +328,7 @@ static void serviceClockSleepWake() {
     display.deepSleep();
   }
 
-  ClockSleepScreen::armWakeTimer();
-  powerManager.startDeepSleep(gpio);
+  powerManager.startDeepSleep(gpio, ClockSleepScreen::armWakeTimer());
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -492,8 +491,7 @@ void setup() {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
         Storage.prepareForDeepSleep();
         // The panel still shows the clock face; keep it ticking.
-        ClockSleepScreen::armWakeTimer();
-        powerManager.startDeepSleep(gpio);
+        powerManager.startDeepSleep(gpio, ClockSleepScreen::armWakeTimer());
       }
       wakePowerReleasePending = true;
       break;

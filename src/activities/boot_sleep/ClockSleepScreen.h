@@ -37,7 +37,8 @@ bool needsRepaint(const struct tm& now);
 void update(GfxRenderer& renderer, const struct tm& now);
 
 // Arms the deep-sleep wake timer for just after the next minute boundary, or
-// right away if the minute already turned. No-op when not active.
-void armWakeTimer();
+// right away if the minute already turned. Returns true when armed; the
+// caller must then keep battery power through sleep.
+bool armWakeTimer();
 
 }  // namespace ClockSleepScreen
