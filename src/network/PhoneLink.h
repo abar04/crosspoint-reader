@@ -32,6 +32,16 @@ struct SyncResult {
 // NimBLE is compiled in and this is an X3.
 bool isAvailable();
 
+// The BLE controller memory survived boot. Arduino releases it unless the link
+// was turned on with enableBluetooth() (or a phone is paired) before this boot.
+bool bluetoothReady();
+
+// Keeps the BLE memory from the next boot on; takes effect after a restart.
+void enableBluetooth();
+
+// Human-readable reason for the last failure, for on-screen diagnosis.
+const char* lastError();
+
 // An iPhone has been paired with this device.
 bool isPaired();
 

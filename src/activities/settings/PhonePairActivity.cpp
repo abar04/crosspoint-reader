@@ -5,13 +5,23 @@
 #include <Logging.h>
 #include <Memory.h>
 
+#include <cstdio>
+#include <cstring>
+
 #include "MappedInputManager.h"
+#include "SilentRestart.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
 void PhonePairActivity::onEnter() {
   Activity::onEnter();
   powerLock = makeUniqueNoThrow<HalPowerManager::Lock>();
+  if (!PhoneLink::bluetoothReady()) {
+    PhoneLink::enableBluetooth();
+    restartPending = true;
+    requestUpdate();
+    return;
+  }
   started = PhoneLink::startPairing();
   if (!started) LOG_ERR("BLE", "Could not start iPhone pairing");
   timedOut = false;
@@ -28,6 +38,12 @@ void PhonePairActivity::onExit() {
 }
 
 void PhonePairActivity::loop() {
+  if (restartPending) {
+    requestUpdateAndWait();
+    delay(1500);
+    silentRestartToSettings();
+    return;
+  }
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     finish();
     return;
@@ -55,15 +71,36 @@ void PhonePairActivity::render(RenderLock&&) {
 
   const int midY = pageHeight / 2;
   const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
+  if (restartPending) {
+    renderer.drawCenteredText(UI_12_FONT_ID, midY - 20, tr(STR_PHONE_PAIR_RESTART), true, EpdFontFamily::BOLD);
+    renderer.drawCenteredText(UI_10_FONT_ID, midY + 10, tr(STR_PHONE_PAIR_REOPEN));
+    renderer.displayBuffer();
+    return;
+  }
   switch (shownState) {
     case PhoneLink::PairState::Paired:
       renderer.drawCenteredText(UI_12_FONT_ID, midY - 20, tr(STR_PHONE_PAIR_DONE), true, EpdFontFamily::BOLD);
       renderer.drawCenteredText(UI_10_FONT_ID, midY + 10, tr(STR_PHONE_PAIR_DONE_HINT));
       break;
-    case PhoneLink::PairState::Failed:
+    case PhoneLink::PairState::Failed: {
       renderer.drawCenteredText(UI_12_FONT_ID, midY - 20, tr(STR_PHONE_PAIR_FAILED), true, EpdFontFamily::BOLD);
-      renderer.drawCenteredText(UI_10_FONT_ID, midY + 10, tr(STR_CHECK_SERIAL_OUTPUT));
+      // Diagnostic detail, wrapped at a space when it is too wide for one line.
+      char detail[96];
+      snprintf(detail, sizeof(detail), "%s", timedOut ? "timed out waiting for the iPhone" : PhoneLink::lastError());
+      char* second = nullptr;
+      if (renderer.getTextWidth(UI_10_FONT_ID, detail) > pageWidth - 20) {
+        for (char* p = detail + strlen(detail) / 2; p > detail; p--) {
+          if (*p == ' ') {
+            *p = '\0';
+            second = p + 1;
+            break;
+          }
+        }
+      }
+      renderer.drawCenteredText(UI_10_FONT_ID, midY + 10, detail);
+      if (second) renderer.drawCenteredText(UI_10_FONT_ID, midY + 10 + lineH, second);
       break;
+    }
     default: {
       int y = midY - 3 * lineH;
       for (const char* step :

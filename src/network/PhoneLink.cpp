@@ -5,6 +5,8 @@
 #include <Logging.h>
 #include <Memory.h>
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 
 #if __has_include(<host/ble_hs.h>)
@@ -25,6 +27,38 @@
 #include <services/gatt/ble_svc_gatt.h>
 
 extern "C" void ble_store_config_init(void);
+
+namespace {
+constexpr char NVS_NAMESPACE[] = "cpphone";
+constexpr char NVS_PAIRED_KEY[] = "paired";
+constexpr char NVS_ENABLED_KEY[] = "enabled";
+bool bleMemoryKept = false;
+
+uint8_t readFlag(const char* key) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return 0;
+  uint8_t value = 0;
+  nvs_get_u8(h, key, &value);
+  nvs_close(h);
+  return value;
+}
+
+void writeFlag(const char* key, const uint8_t value) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_u8(h, key, value);
+  nvs_commit(h);
+  nvs_close(h);
+}
+}  // namespace
+
+// Arduino's initArduino() releases the BLE controller memory (~36 KB) at boot
+// unless this returns true, after which the controller can never start. Keep
+// it only on devices where the iPhone link has been turned on.
+extern "C" bool bleInUse(void) {
+  bleMemoryKept = readFlag(NVS_ENABLED_KEY) != 0 || readFlag(NVS_PAIRED_KEY) != 0;
+  return bleMemoryKept;
+}
 #endif
 
 namespace PhoneLink {
@@ -32,6 +66,9 @@ namespace PhoneLink {
 #if !PHONE_LINK_ENABLED
 
 bool isAvailable() { return false; }
+bool bluetoothReady() { return false; }
+void enableBluetooth() {}
+const char* lastError() { return "Bluetooth not in this build"; }
 bool isPaired() { return false; }
 bool sync(SyncResult&, uint32_t) { return false; }
 bool startPairing() { return false; }
@@ -43,8 +80,6 @@ void stopPairing() {}
 namespace {
 
 constexpr char DEVICE_NAME[] = "CrossPoint";
-constexpr char NVS_NAMESPACE[] = "cpphone";
-constexpr char NVS_PAIRED_KEY[] = "paired";
 // A sync ends once no new notification has been announced for this long and
 // every requested one has been answered.
 constexpr uint32_t NOTIFICATIONS_SETTLE_MS = 600;
@@ -136,16 +171,25 @@ class SessionLock {
   ~SessionLock() { xSemaphoreGiveRecursive(session->lock); }
 };
 
-void setPairedFlag(const bool paired) {
-  nvs_handle_t h;
-  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
-  nvs_set_u8(h, NVS_PAIRED_KEY, paired ? 1 : 0);
-  nvs_commit(h);
-  nvs_close(h);
+void setPairedFlag(const bool paired) { writeFlag(NVS_PAIRED_KEY, paired ? 1 : 0); }
+
+// Last failure, shown on the pairing screen for diagnosis.
+char lastErrorText[80] = "";
+
+void setError(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(lastErrorText, sizeof(lastErrorText), fmt, args);
+  va_end(args);
+  LOG_ERR("BLE", "Phone link: %s", lastErrorText);
 }
 
-void fail(const char* why) {
-  LOG_ERR("BLE", "Phone link: %s", why);
+void fail(const char* why, const int rc = 0) {
+  if (rc != 0) {
+    setError("%s (rc %d)", why, rc);
+  } else {
+    setError("%s", why);
+  }
   session->failed = true;
   if (session->mode == Mode::Pair) session->pairState = PairState::Failed;
   if (session->conn != BLE_HS_CONN_HANDLE_NONE) ble_gap_terminate(session->conn, BLE_ERR_REM_USER_CONN_TERM);
@@ -158,7 +202,7 @@ void ancsUnavailable(const char* why) {
     fail(why);
     return;
   }
-  LOG_ERR("BLE", "Phone link: %s", why);
+  setError("%s", why);
   session->pairState = PairState::Paired;
 }
 
@@ -491,7 +535,7 @@ void advertise() {
   params.itvl_max = BLE_GAP_ADV_ITVL_MS(30);
   const int rc = ble_gap_adv_start(session->ownAddrType, nullptr, BLE_HS_FOREVER, &params, onGapEvent, nullptr);
   if (rc != 0 && rc != BLE_HS_EALREADY) {
-    fail("advertising failed");
+    fail("advertising failed", rc);
     return;
   }
   if (session->mode == Mode::Pair && session->pairState == PairState::Idle) session->pairState = PairState::Advertising;
@@ -527,8 +571,12 @@ int onGapEvent(ble_gap_event* event, void*) {
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
       if (event->enc_change.status != 0) {
-        LOG_ERR("BLE", "Phone link: encryption failed, status %d", event->enc_change.status);
-        if (session->mode == Mode::Sync) fail("encryption failed");
+        if (session->mode == Mode::Sync) {
+          fail("encryption failed", event->enc_change.status);
+        } else {
+          // The phone may retry, e.g. after the pairing prompt timed out.
+          setError("encryption failed (status %d)", event->enc_change.status);
+        }
         return 0;
       }
       ble_gap_conn_desc desc;
@@ -588,8 +636,9 @@ void onReset(int reason) { LOG_ERR("BLE", "Phone link: host reset, reason %d", r
 
 void onSync() {
   ble_hs_util_ensure_addr(0);
-  if (ble_hs_id_infer_auto(0, &session->ownAddrType) != 0) {
-    fail("no BLE address");
+  const int rc = ble_hs_id_infer_auto(0, &session->ownAddrType);
+  if (rc != 0) {
+    fail("no BLE address", rc);
     return;
   }
   advertise();
@@ -601,15 +650,24 @@ void hostTaskMain(void*) {
 }
 
 bool begin(const Mode mode, SyncResult* out) {
-  if (session) return false;
+  if (session) {
+    setError("session already running");
+    return false;
+  }
+  lastErrorText[0] = '\0';
+  if (!bleMemoryKept) {
+    setError("BLE memory was released at boot; restart needed");
+    return false;
+  }
   session = new (std::nothrow) Session();
   if (!session) {
-    LOG_ERR("BLE", "OOM: phone link session");
+    setError("out of memory for session (free heap %u)", static_cast<unsigned>(ESP.getFreeHeap()));
     return false;
   }
   // Recursive: a failed GATT write can call back into the lock holder.
   session->lock = xSemaphoreCreateRecursiveMutex();
   if (!session->lock) {
+    setError("could not create session lock");
     delete session;
     session = nullptr;
     return false;
@@ -619,8 +677,10 @@ bool begin(const Mode mode, SyncResult* out) {
   session->conn = BLE_HS_CONN_HANDLE_NONE;
   session->pairState = PairState::Idle;
 
-  if (nimble_port_init() != ESP_OK) {
-    LOG_ERR("BLE", "Phone link: NimBLE init failed");
+  const esp_err_t err = nimble_port_init();
+  if (err != ESP_OK) {
+    setError("NimBLE init failed: %s (0x%x), free heap %u", esp_err_to_name(err), static_cast<unsigned>(err),
+             static_cast<unsigned>(ESP.getFreeHeap()));
     vSemaphoreDelete(session->lock);
     delete session;
     session = nullptr;
@@ -681,14 +741,13 @@ void collectNotifications(SyncResult& out) {
 
 bool isAvailable() { return gpio.deviceIsX3(); }
 
-bool isPaired() {
-  nvs_handle_t h;
-  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
-  uint8_t paired = 0;
-  nvs_get_u8(h, NVS_PAIRED_KEY, &paired);
-  nvs_close(h);
-  return paired != 0;
-}
+bool bluetoothReady() { return bleMemoryKept; }
+
+void enableBluetooth() { writeFlag(NVS_ENABLED_KEY, 1); }
+
+const char* lastError() { return lastErrorText[0] != '\0' ? lastErrorText : "no details recorded"; }
+
+bool isPaired() { return readFlag(NVS_PAIRED_KEY) != 0; }
 
 bool sync(SyncResult& out, const uint32_t timeoutMs) {
   out = SyncResult{};

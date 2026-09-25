@@ -25,6 +25,8 @@ class PhonePairActivity final : public Activity {
 
   PhoneLink::PairState shownState = PhoneLink::PairState::Idle;
   bool started = false;
+  // Bluetooth memory was released at boot: turn the link on and restart.
+  bool restartPending = false;
   bool timedOut = false;
   unsigned long startedAt = 0;
   // BLE needs the full CPU clock; idle power saving would drop it to 10 MHz.
