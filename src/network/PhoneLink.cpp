@@ -16,6 +16,7 @@
 #endif
 
 #if PHONE_LINK_ENABLED
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <host/ble_hs.h>
@@ -679,8 +680,9 @@ bool begin(const Mode mode, SyncResult* out) {
 
   const esp_err_t err = nimble_port_init();
   if (err != ESP_OK) {
-    setError("NimBLE init failed: %s (0x%x), free heap %u", esp_err_to_name(err), static_cast<unsigned>(err),
-             static_cast<unsigned>(ESP.getFreeHeap()));
+    setError("NimBLE init failed: %s (0x%x), heap free %u, largest %u", esp_err_to_name(err),
+             static_cast<unsigned>(err), static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     vSemaphoreDelete(session->lock);
     delete session;
     session = nullptr;

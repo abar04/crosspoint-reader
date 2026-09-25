@@ -1,5 +1,6 @@
 #include "PhonePairActivity.h"
 
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
@@ -22,6 +23,12 @@ void PhonePairActivity::onEnter() {
     requestUpdate();
     return;
   }
+  // Font caches rebuild on demand; drop them so NimBLE's buffers fit.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->releaseSdFontCaches();
+    fcm->clearCache();
+  }
+  LOG_INF("BLE", "Heap before pairing: free %u", static_cast<unsigned>(ESP.getFreeHeap()));
   started = PhoneLink::startPairing();
   if (!started) LOG_ERR("BLE", "Could not start iPhone pairing");
   timedOut = false;
