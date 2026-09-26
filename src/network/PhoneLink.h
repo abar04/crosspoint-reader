@@ -24,11 +24,12 @@ struct Notification {
   char message[MESSAGE_LEN];
 };
 
-// App & count mode: how many notifications one app has on the phone.
-constexpr int MAX_APP_COUNTS = 5;
-struct AppCount {
-  char app[APP_LEN];  // empty when the phone did not name the app
-  uint8_t count;
+// Sender & app mode: one notification without its message text.
+constexpr int MAX_SENDERS = 8;
+struct Sender {
+  uint32_t arrivedMinutes;  // as Notification::arrivedMinutes
+  char app[APP_LEN];        // empty when the phone did not name the app
+  char title[TITLE_LEN];    // the sender, for messages and mail
 };
 
 struct SyncResult {
@@ -40,16 +41,16 @@ struct SyncResult {
   uint8_t count = 0;  // newest first
   Notification items[MAX_NOTIFICATIONS];
   int8_t phoneBattery = -1;  // percent; -1 when the phone offers no Battery Service
-  // App & count mode: items stays empty and these describe the notifications.
+  // Sender & app mode: items stays empty and these describe the notifications.
   bool summary = false;
-  uint16_t total = 0;     // notifications on the phone that pass the filter
-  uint8_t appCountN = 0;  // most notifications first
-  AppCount appCounts[MAX_APP_COUNTS];
+  uint16_t total = 0;       // notifications on the phone that pass the filter
+  uint8_t senderCount = 0;  // newest first
+  Sender senders[MAX_SENDERS];
 };
 
 // How much of each notification Clock sleep fetches and shows: the full text,
-// or only which apps have notifications and how many.
-enum class Detail : uint8_t { Full, AppAndCount, Count };
+// or the count plus each notification's sender and app without the message.
+enum class Detail : uint8_t { Full, SenderAndApp, Count };
 Detail detail();
 void setDetail(Detail d);
 

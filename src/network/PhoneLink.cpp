@@ -106,8 +106,7 @@ constexpr uint32_t NOTIFICATIONS_SETTLE_MS = 600;
 constexpr uint32_t DISCONNECT_WAIT_MS = 1000;
 // Candidates fetched per sync; the newest MAX_NOTIFICATIONS are kept.
 constexpr int MAX_TRACKED = 8;
-// App & count mode only asks for each notification's app, so it can follow
-// more of them for the per-app breakdown.
+// Sender & app mode skips the message text, so it can follow more of them.
 constexpr int MAX_TRACKED_SUMMARY = 20;
 constexpr int MAX_ENTRIES = MAX_TRACKED_SUMMARY;
 
@@ -200,7 +199,7 @@ struct Session {
   uint16_t batteryLevel;
   volatile int8_t phoneBattery;
   uint16_t categoryMask;
-  bool summaryOnly;  // App & count mode: fetch only each notification's app
+  bool summaryOnly;  // Sender & app mode: never fetch the message text
   int trackLimit;
   uint8_t categoryCounts[16];  // latest ANCS CategoryCount per category
 
@@ -456,9 +455,17 @@ void pumpRequests(uint16_t conn) {
     Entry& e = session->entries[i];
     if (e.state != EntryState::Pending) continue;
     const uint32_t uid = e.n.uid;
-    const uint8_t summaryCmd[] = {ANCS_CMD_GET_NOTIFICATION_ATTRIBUTES, static_cast<uint8_t>(uid),
-                                  static_cast<uint8_t>(uid >> 8),       static_cast<uint8_t>(uid >> 16),
-                                  static_cast<uint8_t>(uid >> 24),      ANCS_ATTR_APP_ID};
+    // Sender & app mode never asks for the message text.
+    const uint8_t summaryCmd[] = {ANCS_CMD_GET_NOTIFICATION_ATTRIBUTES,
+                                  static_cast<uint8_t>(uid),
+                                  static_cast<uint8_t>(uid >> 8),
+                                  static_cast<uint8_t>(uid >> 16),
+                                  static_cast<uint8_t>(uid >> 24),
+                                  ANCS_ATTR_APP_ID,
+                                  ANCS_ATTR_TITLE,
+                                  static_cast<uint8_t>(TITLE_LEN - 1),
+                                  0,
+                                  ANCS_ATTR_DATE};
     const uint8_t cmd[] = {ANCS_CMD_GET_NOTIFICATION_ATTRIBUTES,
                            static_cast<uint8_t>(uid),
                            static_cast<uint8_t>(uid >> 8),
@@ -559,7 +566,7 @@ void parseDataSource(uint16_t conn) {
     const uint8_t* attrs[4] = {};  // app id, title, message, date
     uint16_t lens[4] = {};
     uint16_t pos = 5;
-    const int requested = session->summaryOnly ? 1 : 4;
+    const int requested = session->summaryOnly ? 3 : 4;
     for (int i = 0; i < requested; i++) {
       if (pos + 3 > len) return;  // wait for the next fragment
       const uint16_t attrLen = b[pos + 1] | (b[pos + 2] << 8);
@@ -890,7 +897,7 @@ bool begin(const Mode mode, SyncResult* out) {
   session->phoneBattery = -1;
   session->inFlightApp = -1;
   // The live screen always shows full text.
-  session->summaryOnly = mode == Mode::Sync && detail() == Detail::AppAndCount;
+  session->summaryOnly = mode == Mode::Sync && detail() == Detail::SenderAndApp;
   session->trackLimit = session->summaryOnly ? MAX_TRACKED_SUMMARY : MAX_TRACKED;
   switch (filter()) {
     case Filter::Messages:
@@ -955,9 +962,10 @@ void end() {
   session = nullptr;
 }
 
-// Caller holds the session lock. Newest first by ANCS date
-// ("yyyyMMdd'T'HHmmSS" sorts lexically), with app names filled in.
-int collectNewest(Notification* out, const int max) {
+// Caller holds the session lock. Indices of up to `max` answered
+// notifications, newest first by ANCS date ("yyyyMMdd'T'HHmmSS" sorts
+// lexically).
+int newestEntries(int* out, const int max) {
   int count = 0;
   bool used[MAX_ENTRIES] = {};
   while (count < max) {
@@ -969,52 +977,46 @@ int collectNewest(Notification* out, const int max) {
     }
     if (best < 0) break;
     used[best] = true;
-    const Entry& e = session->entries[best];
-    out[count] = e.n;
-    for (int a = 0; a < session->appCount; a++) {
-      if (strcmp(session->apps[a].appId, e.appId) == 0) {
-        snprintf(out[count].app, sizeof(out[count].app), "%s", session->apps[a].name);
-      }
-    }
-    count++;
+    out[count++] = best;
   }
   return count;
 }
 
-// Caller holds the session lock. Groups the notifications by app, most first.
+// Caller holds the session lock.
+const char* appNameFor(const Entry& e) {
+  for (int a = 0; a < session->appCount; a++) {
+    if (strcmp(session->apps[a].appId, e.appId) == 0) return session->apps[a].name;
+  }
+  return "";
+}
+
+// Caller holds the session lock. Newest first, with app names filled in.
+int collectNewest(Notification* out, const int max) {
+  int idx[MAX_ENTRIES];
+  const int count = newestEntries(idx, max < MAX_ENTRIES ? max : MAX_ENTRIES);
+  for (int i = 0; i < count; i++) {
+    const Entry& e = session->entries[idx[i]];
+    out[i] = e.n;
+    snprintf(out[i].app, sizeof(out[i].app), "%s", appNameFor(e));
+  }
+  return count;
+}
+
+// Caller holds the session lock. Total plus the newest senders, no message text.
 void collectSummary(SyncResult& out) {
   out.summary = true;
-  out.appCountN = 0;
+  int idx[MAX_SENDERS];
+  out.senderCount = static_cast<uint8_t>(newestEntries(idx, MAX_SENDERS));
+  for (int i = 0; i < out.senderCount; i++) {
+    const Entry& e = session->entries[idx[i]];
+    Sender& s = out.senders[i];
+    s.arrivedMinutes = e.n.arrivedMinutes;
+    snprintf(s.app, sizeof(s.app), "%s", appNameFor(e));
+    snprintf(s.title, sizeof(s.title), "%s", e.n.title);
+  }
   int tracked = 0;
   for (int i = 0; i < session->entryCount; i++) {
-    const Entry& e = session->entries[i];
-    if (e.state != EntryState::Done) continue;
-    tracked++;
-    const char* name = "";
-    for (int a = 0; a < session->appCount; a++) {
-      if (strcmp(session->apps[a].appId, e.appId) == 0) name = session->apps[a].name;
-    }
-    int slot = -1;
-    for (int k = 0; k < out.appCountN; k++) {
-      if (strcmp(out.appCounts[k].app, name) == 0) slot = k;
-    }
-    if (slot < 0) {
-      if (out.appCountN == MAX_APP_COUNTS) continue;  // counted in the total only
-      slot = out.appCountN++;
-      snprintf(out.appCounts[slot].app, sizeof(out.appCounts[slot].app), "%s", name);
-      out.appCounts[slot].count = 0;
-    }
-    if (out.appCounts[slot].count < UINT8_MAX) out.appCounts[slot].count++;
-  }
-  // Stable sort, most notifications first.
-  for (int i = 1; i < out.appCountN; i++) {
-    const AppCount v = out.appCounts[i];
-    int j = i - 1;
-    while (j >= 0 && out.appCounts[j].count < v.count) {
-      out.appCounts[j + 1] = out.appCounts[j];
-      j--;
-    }
-    out.appCounts[j + 1] = v;
+    if (session->entries[i].state == EntryState::Done) tracked++;
   }
   // The phone's per-category counts cover notifications beyond those tracked.
   int total = 0;

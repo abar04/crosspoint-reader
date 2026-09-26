@@ -104,7 +104,7 @@ void ClockSettingsActivity::activateIndex(const int index) {
       requestUpdate();
       return;
     case ITEM_PHONE_DETAIL:
-      PhoneLink::setDetail(PhoneLink::detail() == PhoneLink::Detail::Full ? PhoneLink::Detail::AppAndCount
+      PhoneLink::setDetail(PhoneLink::detail() == PhoneLink::Detail::Full ? PhoneLink::Detail::SenderAndApp
                                                                           : PhoneLink::Detail::Full);
       requestUpdate();
       return;

@@ -63,11 +63,11 @@ struct Face {
   uint8_t deviceBattery;     // this device's battery percent
   uint8_t quietHours;        // PhoneLink quiet-hours index captured at sleep
   uint32_t lastSyncMinutes;  // local minutes of the last good phone sync; 0 = none yet
-  // App & count mode: shown instead of the notification text.
+  // Sender & app mode: shown instead of the notification text.
   bool summary;
   uint16_t total;
-  uint8_t appCountN;
-  PhoneLink::AppCount appCounts[PhoneLink::MAX_APP_COUNTS];
+  uint8_t senderCount;
+  PhoneLink::Sender senders[PhoneLink::MAX_SENDERS];
 };
 
 // Whether the face lists anything under the clock (which then moves up).
@@ -303,7 +303,8 @@ int drawStatus(const GfxRenderer& renderer, const Face& f, int y) {
   return y;
 }
 
-// App & count mode: "5 notifications", then one line per app with its count.
+// Sender & app mode: "6 notifications", then one line per notification with
+// the sender on the left and "App · 5m" on the right; no message text.
 void drawSummary(const GfxRenderer& renderer, const Face& f, int y) {
   const int screenW = renderer.getScreenWidth();
   const int margin = screenW / 16;
@@ -311,7 +312,7 @@ void drawSummary(const GfxRenderer& renderer, const Face& f, int y) {
   const int bottom = renderer.getScreenHeight() - margin;
   const int titleH = renderer.getLineHeight(UI_12_FONT_ID);
   const int rowH = titleH + 6;
-  char line[PhoneLink::APP_LEN + 8];
+  char line[PhoneLink::TITLE_LEN + 8];
 
   renderer.fillRect(margin, y, width, 1);
   y += 8;
@@ -324,16 +325,24 @@ void drawSummary(const GfxRenderer& renderer, const Face& f, int y) {
   y += rowH;
 
   int listed = 0;
-  for (int i = 0; i < f.appCountN && y + titleH <= bottom; i++) {
-    const PhoneLink::AppCount& a = f.appCounts[i];
-    char count[8];
-    snprintf(count, sizeof(count), "%u", static_cast<unsigned>(a.count));
-    const int countW = renderer.getTextWidth(UI_12_FONT_ID, count, EpdFontFamily::BOLD);
-    fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::REGULAR, a.app[0] != '\0' ? a.app : tr(STR_OTHER_APPS),
-            width - countW - 16, true, line, sizeof(line));
-    renderer.drawText(UI_12_FONT_ID, margin, y, line);
-    renderer.drawText(UI_12_FONT_ID, margin + width - countW, y, count, true, EpdFontFamily::BOLD);
-    listed += a.count;
+  for (int i = 0; i < f.senderCount && y + titleH <= bottom; i++) {
+    const PhoneLink::Sender& s = f.senders[i];
+    char age[16];
+    PhoneLink::formatAge(age, sizeof(age), s.arrivedMinutes, f.shownMinutes);
+    char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
+    snprintf(meta, sizeof(meta), "%s%s%s", s.app, s.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
+    // The app and age keep at most half the row; the sender gets the rest.
+    char right[sizeof(meta)];
+    fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width / 2, true, right, sizeof(right));
+    const int rightW = right[0] != '\0' ? renderer.getTextWidth(UI_10_FONT_ID, right) : 0;
+    fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, s.title[0] != '\0' ? s.title : tr(STR_OTHER_APPS),
+            width - rightW - 16, true, line, sizeof(line));
+    renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+    if (rightW > 0) {
+      const int baselineShift = titleH - renderer.getLineHeight(UI_10_FONT_ID);
+      renderer.drawText(UI_10_FONT_ID, margin + width - rightW, y + baselineShift, right);
+    }
+    listed++;
     y += rowH;
   }
   if (f.total > listed && y + titleH <= bottom) {
@@ -440,9 +449,9 @@ bool render(GfxRenderer& renderer) {
   face.phoneSync = PhoneLink::isAvailable() && PhoneLink::isPaired();
   face.phoneFailures = 0;
   face.notificationCount = 0;
-  face.summary = PhoneLink::detail() == PhoneLink::Detail::AppAndCount;
+  face.summary = PhoneLink::detail() == PhoneLink::Detail::SenderAndApp;
   face.total = 0;
-  face.appCountN = 0;
+  face.senderCount = 0;
   face.phoneBattery = -1;
   face.shownMinutes = PhoneLink::localMinutes(now);
   face.language = SETTINGS.language;
@@ -530,13 +539,13 @@ void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncR
     changed = true;
   }
   if (result.gotNotifications && result.summary &&
-      (!face.summary || result.total != face.total || result.appCountN != face.appCountN ||
-       memcmp(result.appCounts, face.appCounts, sizeof(PhoneLink::AppCount) * result.appCountN) != 0)) {
+      (!face.summary || result.total != face.total || result.senderCount != face.senderCount ||
+       memcmp(result.senders, face.senders, sizeof(PhoneLink::Sender) * result.senderCount) != 0)) {
     face.summary = true;
     face.notificationCount = 0;
     face.total = result.total;
-    face.appCountN = result.appCountN;
-    memcpy(face.appCounts, result.appCounts, sizeof(PhoneLink::AppCount) * result.appCountN);
+    face.senderCount = result.senderCount;
+    memcpy(face.senders, result.senders, sizeof(PhoneLink::Sender) * result.senderCount);
     changed = true;
   }
   if (result.gotNotifications && !result.summary &&
