@@ -34,6 +34,7 @@ Welcome to the **CrossPoint** firmware. This guide outlines the hardware control
         - [Option C: Self-Hosted Server (Docker Compose)](#option-c-self-hosted-server-docker-compose)
         - [Syncing While Reading](#syncing-while-reading)
     - [3.7 Sleep Screen](#37-sleep-screen)
+      - [Clock](#clock)
       - [Cover settings](#cover-settings)
       - [Custom images](#custom-images)
     - [3.8 Custom Fonts (SD Card)](#38-custom-fonts-sd-card)
@@ -218,6 +219,7 @@ The Settings screen allows you to configure the device's behavior. There are a f
   - "Cover + Custom" - The book cover image while actively reading, falls back to "Custom" behavior otherwise
   - "Quick resume" - The text of the last page read will be displayed on the sleep screen and a moon icon is shown on the edge of the screen. Waking up the device will return to the same page of the opened book. This is useful for quickly resuming reading without waiting for the device to fully wake up and load the book.
   - "Transparent" - A transparent overlay image drawn over the current screen; see [Sleep Screen](#37-sleep-screen) below for more information
+  - "Clock" (X3 only) - The current time in large digits, updated every minute while the device sleeps; see [Sleep Screen](#37-sleep-screen) below for more information
 - **Sleep Screen Cover Mode**: How to display the book cover when "Cover" sleep screen is selected:
   
   - "Fit" (default) - Scale the image down to fit centered on the screen, padding with white borders as necessary
@@ -536,6 +538,32 @@ The **Sleep Screen** setting controls what is displayed when the device goes to 
 | **Cover + Custom** | The cover of the currently open book, shown only while actively reading. Falls back to **Custom** behavior when not reading. |
 | **Transparent**    | A BMP or PNG overlay drawn over the current screen. Supports PNG and 32-bit BGRA alpha transparency, and treats white as transparent in regular BMPs. Falls back to **Dark** if no valid overlay image is found. |
 | **None**           | A blank screen.                                                                                                              |
+| **Clock** (X3 only) | The current time in large digits, updated every minute while the device sleeps (see below). Shows `--:--` and "Clock: Not Set" if the clock has no valid time. |
+
+#### Clock
+
+The **Clock** sleep screen is available on the X3, which has a battery-backed real-time clock. The device wakes briefly once a minute to redraw the digits and goes straight back to sleep, without loading books or the SD card. It uses the timezone and 12/24-hour format from **Settings -> System -> Clock**; set the time there with **Sync Clock Now** first. Until the clock has a valid time, the sleep screen shows `--:--` and "Clock: Not Set" and does not update. The first update of each hour refreshes the whole screen to clear ghosting.
+
+Clock sleep uses more battery than the other sleep screens: the X3 normally switches its battery off while asleep, but it has to stay powered for the clock to keep waking up.
+
+##### iPhone time and notifications (X3)
+
+Pair an iPhone once under **Settings -> System -> Clock -> Pair iPhone**: open **Settings -> Bluetooth** on the iPhone, tap **CrossPoint** under Other Devices, accept the pairing request and allow notifications when asked. If the iPhone already lists CrossPoint from an earlier pairing, tap it (or choose **Forget This Device** first if it will not connect).
+
+After that, each minute of Clock sleep the X3 reconnects to the iPhone for a few seconds:
+
+- The clock takes the iPhone's time and time zone, so it stays correct across travel and daylight-saving changes.
+- The four newest notifications on the iPhone are listed under the clock: the app and how long ago it arrived, the title and the first two lines. The list refreshes within seconds of each minute.
+- Under the time: the date, the X3's battery level and the iPhone's (when the phone shares it). If the last good sync is more than five minutes old, a line shows when it was ("Last iPhone sync 14:05"), or "iPhone not found" if the phone has not answered since the device went to sleep.
+
+Under **Settings -> System -> Clock**:
+
+- **Notification Types** chooses what is fetched: **All**, **Messages & calls** (messages, email, calls and voicemail) or **Messages, calls & calendar**.
+- **Notification Detail** chooses what the clock screen shows: **Full text** (app, age, title and message) or **Sender & app**, which shows the number of notifications and, for each, only the sender (its title), the app and its age. The message text is never fetched from the iPhone in this mode.
+- **iPhone Quiet Hours** pauses the phone sync overnight (22:00-07:00, 23:00-07:00 or 00:00-06:00) to save battery. The clock keeps running; notifications resume at the end of the window.
+- **iPhone Notifications** connects to the iPhone and lists its notifications while the screen is open. Select one with the Up/Down buttons and press **Dismiss** (Confirm) to clear it on the iPhone as well.
+
+If the iPhone is out of range, the clock keeps running from its own chip; after three missed syncs it only looks for the phone every five minutes. Syncing every minute adds noticeably to the battery use of Clock sleep.
 
 #### Cover settings
 

@@ -8,12 +8,14 @@ class ClockSettingsActivity final : public UiListActivity {
  public:
   explicit ClockSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
 
-  static constexpr int ITEM_COUNT = 5;
+  // The last three rows (the iPhone link) are only listed on devices with it.
+  static constexpr int ITEM_COUNT = 10;
+  static constexpr int PHONE_ITEM_COUNT = 5;
 
   void onEnter() override;
 
  private:
-  int listCount() const override { return ITEM_COUNT; }
+  int listCount() const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
   const char* headerTitle() const override;

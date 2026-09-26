@@ -66,7 +66,7 @@ void HalPowerManager::setPowerSaving(bool enabled) {
   // Otherwise, no change needed
 }
 
-void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
+void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool keepBatteryPower) const {
 #ifdef ENABLE_SERIAL_LOG
   // Tear down HWCDC so the host sees a clean disconnect and the peripheral
   // doesn't hold power domains that interfere with USB-powered GPIO wake.
@@ -84,8 +84,14 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
     // gpio_deep_sleep_hold_en), and a held pad silently ignores the drive.
     gpio_hold_dis(XTEINK_C3_GPIO13);
     gpio_set_direction(XTEINK_C3_GPIO13, GPIO_MODE_OUTPUT);
-    gpio_set_level(XTEINK_C3_GPIO13, 0);
+    gpio_set_level(XTEINK_C3_GPIO13, keepBatteryPower ? 1 : 0);
     gpio_hold_en(XTEINK_C3_GPIO13);
+    if (keepBatteryPower) {
+      // The X3 also lists GPIO13 as its SD power enable, which
+      // powerDownRailsForSleep() would drive LOW. The profile is re-selected
+      // at boot, so dropping the pin here only affects this sleep.
+      BoardConfig::ACTIVE.sd.powerEnable = BoardConfig::PIN_UNASSIGNED;
+    }
   }
 #endif
 

@@ -15,6 +15,7 @@
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SPI.h>
 #include <VectorFontSupport.h>
 #include <WiFi.h>
@@ -32,10 +33,12 @@
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/ClockSleepScreen.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "network/PhoneLink.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
@@ -277,6 +280,8 @@ void enterDeepSleep(bool fromTimeout = false) {
   // Commit to sleeping before goToSleep() runs the outgoing activity's onExit():
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
+  // The sleep screen replaces any earlier clock face; render() re-arms it.
+  ClockSleepScreen::deactivate();
   activityManager.goToSleep(fromTimeout);
 
   if (isQuickResumeSleep) {
@@ -296,9 +301,51 @@ void enterDeepSleep(bool fromTimeout = false) {
   halTiltSensor.deepSleep();
   display.deepSleep();
   Storage.prepareForDeepSleep();
+  const bool clockTimerArmed = ClockSleepScreen::armWakeTimer();
   LOG_DBG("MAIN", "Entering deep sleep");
 
-  powerManager.startDeepSleep(gpio);
+  powerManager.startDeepSleep(gpio, clockTimerArmed);
+}
+
+// Covers the iPhone reconnecting to our advertising plus reading its time and
+// notifications.
+constexpr uint32_t PHONE_SYNC_TIMEOUT_MS = 10000;
+
+// Timer wake armed by the Clock sleep screen: repaint the minute and go
+// straight back to sleep without mounting SD, loading settings or starting the
+// UI. Returns only when the wake can't be serviced; setup() then boots normally.
+static void serviceClockSleepWake() {
+  if (!ClockSleepScreen::isActive()) return;
+
+  halClock.begin();
+  ClockSleepScreen::restoreLocale();
+  struct tm now;
+  if (!halClock.localTime(now, /*fresh=*/true)) {
+    LOG_ERR("MAIN", "Clock sleep wake: RTC read failed, booting normally");
+    return;
+  }
+
+  // An early timer wake leaves the display asleep and just re-arms.
+  if (ClockSleepScreen::needsRepaint(now)) {
+    display.begin(/*seamless=*/true);
+    renderer.begin();
+    renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
+    renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
+    ClockSleepScreen::update(renderer, now);
+    // The time is painted first so the minute lands on schedule; the phone
+    // sync then corrects the RTC and refreshes the notification list.
+    if (ClockSleepScreen::phoneSyncDue(now)) {
+      if (auto phone = makeUniqueNoThrow<PhoneLink::SyncResult>()) {
+        const bool ok = PhoneLink::sync(*phone, PHONE_SYNC_TIMEOUT_MS);
+        ClockSleepScreen::applyPhoneSync(renderer, ok, *phone);
+      } else {
+        LOG_ERR("MAIN", "OOM: phone sync result");
+      }
+    }
+    display.deepSleep();
+  }
+
+  powerManager.startDeepSleep(gpio, ClockSleepScreen::armWakeTimer());
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -381,6 +428,10 @@ void setup() {
   powerManager.begin();
 
   const auto wakeupReason = gpio.getWakeupReason();
+  if (wakeupReason == HalGPIO::WakeupReason::Timer) {
+    serviceClockSleepWake();
+  }
+
   // Sample the wake hold now — a click wake is released within milliseconds of
   // boot — but defer the sleep-or-boot decision until SETTINGS is loaded below:
   // click-to-wake is a setting, and an X4 battery power-off cuts all power, so
@@ -456,7 +507,8 @@ void setup() {
       if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
         Storage.prepareForDeepSleep();
-        powerManager.startDeepSleep(gpio);
+        // The panel still shows the clock face; keep it ticking.
+        powerManager.startDeepSleep(gpio, ClockSleepScreen::armWakeTimer());
       }
       wakePowerReleasePending = true;
       break;
@@ -478,6 +530,8 @@ void setup() {
 #endif
     case HalGPIO::WakeupReason::AfterFlash:
       // After flashing, just proceed to boot
+    case HalGPIO::WakeupReason::Timer:
+      // A clock-screen timer wake that couldn't be serviced boots normally.
     case HalGPIO::WakeupReason::Other:
     default:
       break;

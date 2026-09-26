@@ -283,6 +283,11 @@ HalGPIO::WakeupReason HalGPIO::getWakeupReason() const {
   const auto wakeupCause = esp_sleep_get_wakeup_cause();
   const auto resetReason = esp_reset_reason();
 
+  // Checked before isUsbConnected(), which costs an I2C gauge read on the X3.
+  if (resetReason == ESP_RST_DEEPSLEEP && wakeupCause == ESP_SLEEP_WAKEUP_TIMER) {
+    return WakeupReason::Timer;
+  }
+
   const bool usbConnected = isUsbConnected();
 
   if (resetReason == ESP_RST_DEEPSLEEP &&
