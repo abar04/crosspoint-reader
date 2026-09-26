@@ -559,6 +559,7 @@ After that, each minute of Clock sleep the X3 reconnects to the iPhone for a few
 Under **Settings -> System -> Clock**:
 
 - **Notification Types** chooses what is fetched: **All**, **Messages & calls** (messages, email, calls and voicemail) or **Messages, calls & calendar**.
+- **Notification Detail** chooses what the clock screen shows: **Full text** (app, age, title and message) or **App & count**, which lists only how many notifications each app has, for example "5 notifications: Messages 3, Mail 2", without any of their text.
 - **iPhone Quiet Hours** pauses the phone sync overnight (22:00-07:00, 23:00-07:00 or 00:00-06:00) to save battery. The clock keeps running; notifications resume at the end of the window.
 - **iPhone Notifications** connects to the iPhone and lists its notifications while the screen is open. Select one with the Up/Down buttons and press **Dismiss** (Confirm) to clear it on the iPhone as well.
 

@@ -63,7 +63,15 @@ struct Face {
   uint8_t deviceBattery;     // this device's battery percent
   uint8_t quietHours;        // PhoneLink quiet-hours index captured at sleep
   uint32_t lastSyncMinutes;  // local minutes of the last good phone sync; 0 = none yet
+  // App & count mode: shown instead of the notification text.
+  bool summary;
+  uint16_t total;
+  uint8_t appCountN;
+  PhoneLink::AppCount appCounts[PhoneLink::MAX_APP_COUNTS];
 };
+
+// Whether the face lists anything under the clock (which then moves up).
+bool hasList(const Face& f) { return f.summary ? f.total > 0 : f.notificationCount > 0; }
 RTC_DATA_ATTR Face face;
 
 // Seven-segment bits: a top, b upper right, c lower right, d bottom,
@@ -295,6 +303,45 @@ int drawStatus(const GfxRenderer& renderer, const Face& f, int y) {
   return y;
 }
 
+// App & count mode: "5 notifications", then one line per app with its count.
+void drawSummary(const GfxRenderer& renderer, const Face& f, int y) {
+  const int screenW = renderer.getScreenWidth();
+  const int margin = screenW / 16;
+  const int width = screenW - 2 * margin;
+  const int bottom = renderer.getScreenHeight() - margin;
+  const int titleH = renderer.getLineHeight(UI_12_FONT_ID);
+  const int rowH = titleH + 6;
+  char line[PhoneLink::APP_LEN + 8];
+
+  renderer.fillRect(margin, y, width, 1);
+  y += 8;
+  if (f.total == 1) {
+    snprintf(line, sizeof(line), "%s", tr(STR_NOTIFICATION_COUNT_ONE));
+  } else {
+    snprintf(line, sizeof(line), tr(STR_NOTIFICATION_COUNT), static_cast<int>(f.total));
+  }
+  renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+  y += rowH;
+
+  int listed = 0;
+  for (int i = 0; i < f.appCountN && y + titleH <= bottom; i++) {
+    const PhoneLink::AppCount& a = f.appCounts[i];
+    char count[8];
+    snprintf(count, sizeof(count), "%u", static_cast<unsigned>(a.count));
+    const int countW = renderer.getTextWidth(UI_12_FONT_ID, count, EpdFontFamily::BOLD);
+    fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::REGULAR, a.app[0] != '\0' ? a.app : tr(STR_OTHER_APPS),
+            width - countW - 16, true, line, sizeof(line));
+    renderer.drawText(UI_12_FONT_ID, margin, y, line);
+    renderer.drawText(UI_12_FONT_ID, margin + width - countW, y, count, true, EpdFontFamily::BOLD);
+    listed += a.count;
+    y += rowH;
+  }
+  if (f.total > listed && y + titleH <= bottom) {
+    snprintf(line, sizeof(line), tr(STR_MORE_COUNT), static_cast<int>(f.total - listed));
+    renderer.drawText(UI_12_FONT_ID, margin, y, line);
+  }
+}
+
 // Deterministic for a given face: update() redraws the previous minute to
 // rebuild the controller baseline, so the pixels must match the earlier paint.
 // With notifications the clock moves to the top and the list fills the rest.
@@ -312,7 +359,7 @@ void drawFace(const GfxRenderer& renderer, const Face& f) {
   const int faceW = hourW + m.colonW + 2 * m.digitW + m.pairGap;
 
   int x = (renderer.getScreenWidth() - faceW) / 2;
-  const int y = f.notificationCount > 0 ? renderer.getScreenHeight() / 12 : (renderer.getScreenHeight() - m.digitH) / 2;
+  const int y = hasList(f) ? renderer.getScreenHeight() / 12 : (renderer.getScreenHeight() - m.digitH) / 2;
   int belowClock = y + m.digitH;
 
   if (twoHourDigits) {
@@ -337,7 +384,11 @@ void drawFace(const GfxRenderer& renderer, const Face& f) {
   }
   belowClock += m.digitH / 10;
   belowClock = drawStatus(renderer, f, belowClock);
-  drawNotifications(renderer, f, belowClock + m.digitH / 6);
+  if (f.summary) {
+    if (f.total > 0) drawSummary(renderer, f, belowClock + m.digitH / 6);
+  } else {
+    drawNotifications(renderer, f, belowClock + m.digitH / 6);
+  }
 }
 
 // "--:--" with a note, for an RTC that has no valid time (never set, or its
@@ -389,6 +440,9 @@ bool render(GfxRenderer& renderer) {
   face.phoneSync = PhoneLink::isAvailable() && PhoneLink::isPaired();
   face.phoneFailures = 0;
   face.notificationCount = 0;
+  face.summary = PhoneLink::detail() == PhoneLink::Detail::AppAndCount;
+  face.total = 0;
+  face.appCountN = 0;
   face.phoneBattery = -1;
   face.shownMinutes = PhoneLink::localMinutes(now);
   face.language = SETTINGS.language;
@@ -475,9 +529,20 @@ void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncR
     face.phoneBattery = result.phoneBattery;
     changed = true;
   }
-  if (result.gotNotifications &&
-      (result.count != face.notificationCount ||
+  if (result.gotNotifications && result.summary &&
+      (!face.summary || result.total != face.total || result.appCountN != face.appCountN ||
+       memcmp(result.appCounts, face.appCounts, sizeof(PhoneLink::AppCount) * result.appCountN) != 0)) {
+    face.summary = true;
+    face.notificationCount = 0;
+    face.total = result.total;
+    face.appCountN = result.appCountN;
+    memcpy(face.appCounts, result.appCounts, sizeof(PhoneLink::AppCount) * result.appCountN);
+    changed = true;
+  }
+  if (result.gotNotifications && !result.summary &&
+      (face.summary || result.count != face.notificationCount ||
        memcmp(result.items, face.notifications, sizeof(PhoneLink::Notification) * result.count) != 0)) {
+    face.summary = false;
     face.notificationCount = result.count;
     memcpy(face.notifications, result.items, sizeof(PhoneLink::Notification) * result.count);
     changed = true;

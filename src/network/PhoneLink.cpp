@@ -37,6 +37,7 @@ constexpr char NVS_PAIRED_KEY[] = "paired";
 constexpr char NVS_ENABLED_KEY[] = "enabled";
 constexpr char NVS_FILTER_KEY[] = "filter";
 constexpr char NVS_QUIET_KEY[] = "quiet";
+constexpr char NVS_DETAIL_KEY[] = "detail";
 bool bleMemoryKept = false;
 
 uint8_t readFlag(const char* key) {
@@ -81,6 +82,8 @@ PairState pairState() { return PairState::Idle; }
 void stopPairing() {}
 Filter filter() { return Filter::All; }
 void setFilter(Filter) {}
+Detail detail() { return Detail::Full; }
+void setDetail(Detail) {}
 uint8_t quietHours() { return 0; }
 void setQuietHours(uint8_t) {}
 bool startLive() { return false; }
@@ -103,6 +106,10 @@ constexpr uint32_t NOTIFICATIONS_SETTLE_MS = 600;
 constexpr uint32_t DISCONNECT_WAIT_MS = 1000;
 // Candidates fetched per sync; the newest MAX_NOTIFICATIONS are kept.
 constexpr int MAX_TRACKED = 8;
+// App & count mode only asks for each notification's app, so it can follow
+// more of them for the per-app breakdown.
+constexpr int MAX_TRACKED_SUMMARY = 20;
+constexpr int MAX_ENTRIES = MAX_TRACKED_SUMMARY;
 
 // Current Time Service (Bluetooth SIG).
 const ble_uuid16_t CTS_SERVICE = BLE_UUID16_INIT(0x1805);
@@ -193,10 +200,13 @@ struct Session {
   uint16_t batteryLevel;
   volatile int8_t phoneBattery;
   uint16_t categoryMask;
+  bool summaryOnly;  // App & count mode: fetch only each notification's app
+  int trackLimit;
+  uint8_t categoryCounts[16];  // latest ANCS CategoryCount per category
 
-  Entry entries[MAX_TRACKED];
+  Entry entries[MAX_ENTRIES];
   int entryCount;
-  AppName apps[MAX_TRACKED];
+  AppName apps[MAX_ENTRIES];
   int appCount;
   uint32_t inFlightUid;
   int inFlightApp;  // index into apps, or -1 for a notification request
@@ -446,6 +456,9 @@ void pumpRequests(uint16_t conn) {
     Entry& e = session->entries[i];
     if (e.state != EntryState::Pending) continue;
     const uint32_t uid = e.n.uid;
+    const uint8_t summaryCmd[] = {ANCS_CMD_GET_NOTIFICATION_ATTRIBUTES, static_cast<uint8_t>(uid),
+                                  static_cast<uint8_t>(uid >> 8),       static_cast<uint8_t>(uid >> 16),
+                                  static_cast<uint8_t>(uid >> 24),      ANCS_ATTR_APP_ID};
     const uint8_t cmd[] = {ANCS_CMD_GET_NOTIFICATION_ATTRIBUTES,
                            static_cast<uint8_t>(uid),
                            static_cast<uint8_t>(uid >> 8),
@@ -459,7 +472,9 @@ void pumpRequests(uint16_t conn) {
                            static_cast<uint8_t>(MESSAGE_LEN - 1),
                            0,
                            ANCS_ATTR_DATE};
-    if (ble_gattc_write_flat(conn, session->ancsCp.valHandle, cmd, sizeof(cmd), onRequestWritten, nullptr) != 0) {
+    const uint8_t* request = session->summaryOnly ? summaryCmd : cmd;
+    const size_t requestLen = session->summaryOnly ? sizeof(summaryCmd) : sizeof(cmd);
+    if (ble_gattc_write_flat(conn, session->ancsCp.valHandle, request, requestLen, onRequestWritten, nullptr) != 0) {
       e.state = EntryState::Done;
       continue;
     }
@@ -523,7 +538,7 @@ void registerApp(const char* appId) {
   for (int i = 0; i < session->appCount; i++) {
     if (strcmp(session->apps[i].appId, appId) == 0) return;
   }
-  if (session->appCount == MAX_TRACKED) return;
+  if (session->appCount == MAX_ENTRIES) return;
   AppName& a = session->apps[session->appCount++];
   memset(&a, 0, sizeof(a));
   snprintf(a.appId, sizeof(a.appId), "%s", appId);
@@ -544,7 +559,8 @@ void parseDataSource(uint16_t conn) {
     const uint8_t* attrs[4] = {};  // app id, title, message, date
     uint16_t lens[4] = {};
     uint16_t pos = 5;
-    for (int i = 0; i < 4; i++) {
+    const int requested = session->summaryOnly ? 1 : 4;
+    for (int i = 0; i < requested; i++) {
       if (pos + 3 > len) return;  // wait for the next fragment
       const uint16_t attrLen = b[pos + 1] | (b[pos + 2] << 8);
       if (pos + 3 + attrLen > len) return;
@@ -597,6 +613,7 @@ void onNotificationSource(uint16_t conn, const uint8_t* ns) {
   memcpy(&uid, ns + 4, sizeof(uid));
   SessionLock lock;
   session->lastEventMs = millis();
+  if (category < 16) session->categoryCounts[category] = ns[3];
   int found = -1;
   for (int i = 0; i < session->entryCount; i++) {
     if (session->entries[i].n.uid == uid) found = i;
@@ -606,9 +623,9 @@ void onNotificationSource(uint16_t conn, const uint8_t* ns) {
     session->entryCount--;
   } else if (event == ANCS_EVENT_ADDED && found < 0 && category < 16 &&
              (session->categoryMask & (1u << category)) != 0) {
-    if (session->entryCount == MAX_TRACKED) {
+    if (session->entryCount == session->trackLimit) {
       // Keep the newest: drop the oldest candidate.
-      memmove(&session->entries[0], &session->entries[1], sizeof(Entry) * (MAX_TRACKED - 1));
+      memmove(&session->entries[0], &session->entries[1], sizeof(Entry) * (session->trackLimit - 1));
       session->entryCount--;
     }
     Entry& e = session->entries[session->entryCount++];
@@ -872,6 +889,9 @@ bool begin(const Mode mode, SyncResult* out) {
   session->pairState = PairState::Idle;
   session->phoneBattery = -1;
   session->inFlightApp = -1;
+  // The live screen always shows full text.
+  session->summaryOnly = mode == Mode::Sync && detail() == Detail::AppAndCount;
+  session->trackLimit = session->summaryOnly ? MAX_TRACKED_SUMMARY : MAX_TRACKED;
   switch (filter()) {
     case Filter::Messages:
       session->categoryMask = CATEGORY_MESSAGES;
@@ -939,7 +959,7 @@ void end() {
 // ("yyyyMMdd'T'HHmmSS" sorts lexically), with app names filled in.
 int collectNewest(Notification* out, const int max) {
   int count = 0;
-  bool used[MAX_TRACKED] = {};
+  bool used[MAX_ENTRIES] = {};
   while (count < max) {
     int best = -1;
     for (int i = 0; i < session->entryCount; i++) {
@@ -959,6 +979,49 @@ int collectNewest(Notification* out, const int max) {
     count++;
   }
   return count;
+}
+
+// Caller holds the session lock. Groups the notifications by app, most first.
+void collectSummary(SyncResult& out) {
+  out.summary = true;
+  out.appCountN = 0;
+  int tracked = 0;
+  for (int i = 0; i < session->entryCount; i++) {
+    const Entry& e = session->entries[i];
+    if (e.state != EntryState::Done) continue;
+    tracked++;
+    const char* name = "";
+    for (int a = 0; a < session->appCount; a++) {
+      if (strcmp(session->apps[a].appId, e.appId) == 0) name = session->apps[a].name;
+    }
+    int slot = -1;
+    for (int k = 0; k < out.appCountN; k++) {
+      if (strcmp(out.appCounts[k].app, name) == 0) slot = k;
+    }
+    if (slot < 0) {
+      if (out.appCountN == MAX_APP_COUNTS) continue;  // counted in the total only
+      slot = out.appCountN++;
+      snprintf(out.appCounts[slot].app, sizeof(out.appCounts[slot].app), "%s", name);
+      out.appCounts[slot].count = 0;
+    }
+    if (out.appCounts[slot].count < UINT8_MAX) out.appCounts[slot].count++;
+  }
+  // Stable sort, most notifications first.
+  for (int i = 1; i < out.appCountN; i++) {
+    const AppCount v = out.appCounts[i];
+    int j = i - 1;
+    while (j >= 0 && out.appCounts[j].count < v.count) {
+      out.appCounts[j + 1] = out.appCounts[j];
+      j--;
+    }
+    out.appCounts[j + 1] = v;
+  }
+  // The phone's per-category counts cover notifications beyond those tracked.
+  int total = 0;
+  for (int c = 0; c < 16; c++) {
+    if (session->categoryMask & (1u << c)) total += session->categoryCounts[c];
+  }
+  out.total = static_cast<uint16_t>(total > tracked ? total : tracked);
 }
 
 // Caller holds the session lock.
@@ -1000,7 +1063,11 @@ bool sync(SyncResult& out, const uint32_t timeoutMs) {
     if (session->subscribed) {
       SessionLock lock;
       if (!requestsPending() && millis() - session->lastEventMs >= NOTIFICATIONS_SETTLE_MS) {
-        out.count = static_cast<uint8_t>(collectNewest(out.items, MAX_NOTIFICATIONS));
+        if (session->summaryOnly) {
+          collectSummary(out);
+        } else {
+          out.count = static_cast<uint8_t>(collectNewest(out.items, MAX_NOTIFICATIONS));
+        }
         out.gotNotifications = true;
         done = true;
         break;
@@ -1030,6 +1097,13 @@ Filter filter() {
 }
 
 void setFilter(const Filter f) { writeFlag(NVS_FILTER_KEY, static_cast<uint8_t>(f)); }
+
+Detail detail() {
+  const uint8_t d = readFlag(NVS_DETAIL_KEY);
+  return d < static_cast<uint8_t>(Detail::Count) ? static_cast<Detail>(d) : Detail::Full;
+}
+
+void setDetail(const Detail d) { writeFlag(NVS_DETAIL_KEY, static_cast<uint8_t>(d)); }
 
 uint8_t quietHours() {
   const uint8_t q = readFlag(NVS_QUIET_KEY);

@@ -24,6 +24,13 @@ struct Notification {
   char message[MESSAGE_LEN];
 };
 
+// App & count mode: how many notifications one app has on the phone.
+constexpr int MAX_APP_COUNTS = 5;
+struct AppCount {
+  char app[APP_LEN];  // empty when the phone did not name the app
+  uint8_t count;
+};
+
 struct SyncResult {
   bool gotTime = false;
   time_t utc = 0;
@@ -33,7 +40,18 @@ struct SyncResult {
   uint8_t count = 0;  // newest first
   Notification items[MAX_NOTIFICATIONS];
   int8_t phoneBattery = -1;  // percent; -1 when the phone offers no Battery Service
+  // App & count mode: items stays empty and these describe the notifications.
+  bool summary = false;
+  uint16_t total = 0;     // notifications on the phone that pass the filter
+  uint8_t appCountN = 0;  // most notifications first
+  AppCount appCounts[MAX_APP_COUNTS];
 };
+
+// How much of each notification Clock sleep fetches and shows: the full text,
+// or only which apps have notifications and how many.
+enum class Detail : uint8_t { Full, AppAndCount, Count };
+Detail detail();
+void setDetail(Detail d);
 
 // Which notification categories are fetched from the phone.
 enum class Filter : uint8_t { All, Messages, MessagesAndCalendar, Count };
