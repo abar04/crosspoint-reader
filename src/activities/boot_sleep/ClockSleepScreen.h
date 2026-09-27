@@ -23,6 +23,9 @@ bool render(GfxRenderer& renderer);
 // True while the panel shows a face painted by render() or update().
 bool isActive();
 
+// True while a clock face is up that syncs with a paired iPhone.
+bool hasPhone();
+
 // Ends the clock sleep cycle; call before painting any other sleep screen.
 void deactivate();
 

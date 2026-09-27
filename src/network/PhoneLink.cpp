@@ -77,6 +77,7 @@ void enableBluetooth() {}
 const char* lastError() { return "Bluetooth not in this build"; }
 bool isPaired() { return false; }
 bool sync(SyncResult&, uint32_t) { return false; }
+bool clearAll(SyncResult&, uint32_t) { return false; }
 bool startPairing() { return false; }
 PairState pairState() { return PairState::Idle; }
 void stopPairing() {}
@@ -110,6 +111,8 @@ constexpr uint32_t DISCONNECT_WAIT_MS = 1000;
 constexpr int MAX_TRACKED = 8;
 // Sender & app mode skips the message text, so it can follow more of them.
 constexpr int MAX_TRACKED_SUMMARY = 20;
+// Notifications a clear-all session queues for clearing.
+constexpr int MAX_CLEAR = 64;
 constexpr int MAX_ENTRIES = MAX_TRACKED_SUMMARY;
 
 // Current Time Service (Bluetooth SIG).
@@ -134,6 +137,8 @@ const ble_uuid128_t ANCS_DATA_SOURCE =
 
 constexpr uint8_t ANCS_EVENT_ADDED = 0;
 constexpr uint8_t ANCS_EVENT_REMOVED = 2;
+constexpr uint8_t ANCS_FLAG_NEGATIVE_ACTION = 1u << 4;
+constexpr uint8_t ANCS_CATEGORY_INCOMING_CALL = 1;
 constexpr uint8_t ANCS_CMD_GET_NOTIFICATION_ATTRIBUTES = 0;
 constexpr uint8_t ANCS_CMD_GET_APP_ATTRIBUTES = 1;
 constexpr uint8_t ANCS_CMD_PERFORM_ACTION = 2;
@@ -207,6 +212,12 @@ struct Session {
   bool summaryOnly;  // Sender & app mode: never fetch the message text
   int trackLimit;
   uint8_t categoryCounts[16];  // latest ANCS CategoryCount per category
+
+  // Clear-all session: UIDs still to clear, sent one at a time.
+  bool clearing;
+  uint32_t clearQueue[MAX_CLEAR];
+  int clearCount;
+  int clearedCount;
 
   Entry entries[MAX_ENTRIES];
   int entryCount;
@@ -554,6 +565,19 @@ uint16_t chrEnd(const Chr& c) {
 
 void pumpRequests(uint16_t conn);
 
+int onClearWritten(uint16_t conn, const ble_gatt_error* error, ble_gatt_attr*, void*) {
+  SessionLock lock;
+  if (error->status == 0) {
+    session->clearedCount++;
+  } else {
+    LOG_ERR("BLE", "Phone link: clear refused, status %d", error->status);
+  }
+  session->lastEventMs = millis();
+  session->requestInFlight = false;
+  pumpRequests(conn);
+  return 0;
+}
+
 int onRequestWritten(uint16_t conn, const ble_gatt_error* error, ble_gatt_attr*, void*) {
   if (error->status == 0) return 0;
   // The notification went away before we asked (ANCS error 0xA2), or the
@@ -576,6 +600,16 @@ int onRequestWritten(uint16_t conn, const ble_gatt_error* error, ble_gatt_attr*,
 // notification details go first, then the names of the apps they came from.
 void pumpRequests(uint16_t conn) {
   if (session->requestInFlight) return;
+  while (session->clearCount > 0) {
+    const uint32_t uid = session->clearQueue[--session->clearCount];
+    const uint8_t cmd[] = {ANCS_CMD_PERFORM_ACTION,         static_cast<uint8_t>(uid),
+                           static_cast<uint8_t>(uid >> 8),  static_cast<uint8_t>(uid >> 16),
+                           static_cast<uint8_t>(uid >> 24), ANCS_ACTION_NEGATIVE};
+    if (ble_gattc_write_flat(conn, session->ancsCp.valHandle, cmd, sizeof(cmd), onClearWritten, nullptr) == 0) {
+      session->requestInFlight = true;
+      return;
+    }
+  }
   // Newest first, so a long backlog still yields the latest notifications.
   for (int i = session->entryCount - 1; i >= 0; i--) {
     Entry& e = session->entries[i];
@@ -751,7 +785,12 @@ void onNotificationSource(uint16_t conn, const uint8_t* ns) {
   for (int i = 0; i < session->entryCount; i++) {
     if (session->entries[i].n.uid == uid) found = i;
   }
-  if (event == ANCS_EVENT_REMOVED && found >= 0) {
+  const bool clearable = session->clearing && event == ANCS_EVENT_ADDED && category < 16 &&
+                         category != ANCS_CATEGORY_INCOMING_CALL && (ns[1] & ANCS_FLAG_NEGATIVE_ACTION) != 0 &&
+                         (session->categoryMask & (1u << category)) != 0;
+  if (clearable) {
+    if (session->clearCount < MAX_CLEAR) session->clearQueue[session->clearCount++] = uid;
+  } else if (event == ANCS_EVENT_REMOVED && found >= 0) {
     memmove(&session->entries[found], &session->entries[found + 1], sizeof(Entry) * (session->entryCount - found - 1));
     session->entryCount--;
   } else if (event == ANCS_EVENT_ADDED && found < 0 && category < 16 &&
@@ -997,7 +1036,7 @@ void hostTaskMain(void*) {
   nimble_port_freertos_deinit();
 }
 
-bool begin(const Mode mode, SyncResult* out) {
+bool begin(const Mode mode, SyncResult* out, const bool clearing = false) {
   if (session) {
     setError("session already running");
     return false;
@@ -1022,6 +1061,7 @@ bool begin(const Mode mode, SyncResult* out) {
   }
   session->mode = mode;
   session->out = out;
+  session->clearing = clearing;
   session->conn = BLE_HS_CONN_HANDLE_NONE;
   session->pairState = PairState::Idle;
   session->phoneBattery = -1;
@@ -1158,7 +1198,7 @@ void collectSummary(SyncResult& out) {
 
 // Caller holds the session lock.
 bool requestsPending() {
-  if (session->requestInFlight) return true;
+  if (session->requestInFlight || session->clearCount > 0) return true;
   for (int i = 0; i < session->entryCount; i++) {
     if (session->entries[i].state != EntryState::Done) return true;
   }
@@ -1185,9 +1225,10 @@ const char* lastError() { return lastErrorText[0] != '\0' ? lastErrorText : "no 
 
 bool isPaired() { return readFlag(NVS_PAIRED_KEY) != 0; }
 
-bool sync(SyncResult& out, const uint32_t timeoutMs) {
+namespace {
+bool runSync(SyncResult& out, const uint32_t timeoutMs, const bool clearing) {
   out = SyncResult{};
-  if (!isAvailable() || !begin(Mode::Sync, &out)) return false;
+  if (!isAvailable() || !begin(Mode::Sync, &out, clearing)) return false;
 
   const uint32_t start = millis();
   bool done = false;
@@ -1208,11 +1249,17 @@ bool sync(SyncResult& out, const uint32_t timeoutMs) {
     delay(20);
   }
   const bool gotTime = out.gotTime;
-  LOG_INF("BLE", "Phone link: sync %s in %lu ms (time %s, %u notifications, battery %d)", done ? "done" : "incomplete",
-          static_cast<unsigned long>(millis() - start), gotTime ? "yes" : "no", out.count, out.phoneBattery);
+  LOG_INF("BLE", "Phone link: sync %s in %lu ms (time %s, %u notifications, %d cleared, battery %d)",
+          done ? "done" : "incomplete", static_cast<unsigned long>(millis() - start), gotTime ? "yes" : "no", out.count,
+          session->clearedCount, out.phoneBattery);
   end();
   return done || gotTime;
 }
+}  // namespace
+
+bool sync(SyncResult& out, const uint32_t timeoutMs) { return runSync(out, timeoutMs, false); }
+
+bool clearAll(SyncResult& out, const uint32_t timeoutMs) { return runSync(out, timeoutMs, true); }
 
 bool startPairing() {
   if (!isAvailable()) return false;

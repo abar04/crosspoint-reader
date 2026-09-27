@@ -567,6 +567,8 @@ Under **Settings -> System -> Clock**:
 - **iPhone Notifications** connects to the iPhone and lists its notifications while the screen is open. Select one with the Up/Down buttons and press **Dismiss** (Confirm) to clear it on the iPhone as well.
 - **Now Playing** connects to the iPhone and shows what is playing. **Confirm** plays or pauses, **Left**/**Right** skip to the previous/next track and **Up**/**Down** change the volume.
 
+**Double-click the power button** during Clock sleep to clear the notifications on the iPhone. The X3 reconnects, clears every notification that passes **Notification Types** and offers a clear action, refreshes the list and goes back to sleep; the screen updates a few seconds later. Incoming calls are never touched. A single click still goes back to sleep and a long press still wakes the device (with **Short Power Button Press** set to **Sleep**, a single click wakes it about half a second later than before).
+
 If the iPhone is out of range, the clock keeps running from its own chip; after three missed syncs it only looks for the phone every five minutes. Syncing every minute adds noticeably to the battery use of Clock sleep.
 
 #### Cover settings

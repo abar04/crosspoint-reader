@@ -310,11 +310,19 @@ void enterDeepSleep(bool fromTimeout = false) {
 // Covers the iPhone reconnecting to our advertising plus reading its time and
 // notifications.
 constexpr uint32_t PHONE_SYNC_TIMEOUT_MS = 10000;
+// Clearing sends one command per notification, so it gets longer.
+constexpr uint32_t PHONE_CLEAR_TIMEOUT_MS = 20000;
+// Power-button double click during Clock sleep: the waking press must be
+// released within CLICK_MAX_MS, the second press follow within WINDOW_MS.
+constexpr unsigned long CLOCK_CLICK_MAX_MS = 300;
+constexpr unsigned long CLOCK_DOUBLE_CLICK_WINDOW_MS = 500;
 
-// Timer wake armed by the Clock sleep screen: repaint the minute and go
-// straight back to sleep without mounting SD, loading settings or starting the
+// Timer wake armed by the Clock sleep screen, or a power double click during
+// it: repaint the minute and go straight back to sleep without mounting SD, loading settings or starting the
 // UI. Returns only when the wake can't be serviced; setup() then boots normally.
-static void serviceClockSleepWake() {
+// With `clearNotifications` (a power-button double click) the phone sync runs
+// at once and clears the iPhone's notifications first.
+static void serviceClockSleepWake(const bool clearNotifications) {
   if (!ClockSleepScreen::isActive()) return;
 
   halClock.begin();
@@ -328,7 +336,8 @@ static void serviceClockSleepWake() {
   // Syncs happen with each new minute, plus once right after going to sleep.
   // An early timer wake with neither leaves the display asleep and re-arms.
   const bool repaint = ClockSleepScreen::needsRepaint(now);
-  const bool syncDue = (ClockSleepScreen::takeInitialSync() || repaint) && ClockSleepScreen::phoneSyncDue(now);
+  const bool syncDue =
+      clearNotifications || ((ClockSleepScreen::takeInitialSync() || repaint) && ClockSleepScreen::phoneSyncDue(now));
   if (repaint || syncDue) {
     display.begin(/*seamless=*/true);
     renderer.begin();
@@ -343,7 +352,8 @@ static void serviceClockSleepWake() {
     // sync then corrects the RTC and refreshes the notification list.
     if (syncDue) {
       if (auto phone = makeUniqueNoThrow<PhoneLink::SyncResult>()) {
-        const bool ok = PhoneLink::sync(*phone, PHONE_SYNC_TIMEOUT_MS);
+        const bool ok = clearNotifications ? PhoneLink::clearAll(*phone, PHONE_CLEAR_TIMEOUT_MS)
+                                           : PhoneLink::sync(*phone, PHONE_SYNC_TIMEOUT_MS);
         ClockSleepScreen::applyPhoneSync(renderer, ok, *phone);
       } else {
         LOG_ERR("MAIN", "OOM: phone sync result");
@@ -436,7 +446,7 @@ void setup() {
 
   const auto wakeupReason = gpio.getWakeupReason();
   if (wakeupReason == HalGPIO::WakeupReason::Timer) {
-    serviceClockSleepWake();
+    serviceClockSleepWake(/*clearNotifications=*/false);
   }
 
   // Sample the wake hold now — a click wake is released within milliseconds of
@@ -444,6 +454,13 @@ void setup() {
   // click-to-wake is a setting, and an X4 battery power-off cuts all power, so
   // only SD state survives to the next boot.
   const bool wakeHoldVerified = wakeupReason != HalGPIO::WakeupReason::PowerButton || gpio.verifyPowerButtonWakeup();
+
+  // Double-clicking power during Clock sleep clears the iPhone's notifications
+  // and goes back to sleep; any other press carries on below.
+  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && ClockSleepScreen::hasPhone() &&
+      gpio.powerWakeWasDoubleClick(CLOCK_CLICK_MAX_MS, CLOCK_DOUBLE_CLICK_WINDOW_MS)) {
+    serviceClockSleepWake(/*clearNotifications=*/true);
+  }
 
   // X4 Pro and X4 Classic both map BTN_UP to GPIO0 — an ESP32-S3 boot strap — so
   // gate recovery on the non-strap Down key (GPIO7) to avoid a stuck-in-recovery loop.

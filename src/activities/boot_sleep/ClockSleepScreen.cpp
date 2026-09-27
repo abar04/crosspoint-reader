@@ -620,6 +620,8 @@ bool render(GfxRenderer& renderer) {
 
 bool isActive() { return face.magic == FACE_MAGIC; }
 
+bool hasPhone() { return isActive() && face.phoneSync; }
+
 void deactivate() { face.magic = 0; }
 
 void restoreLocale() {

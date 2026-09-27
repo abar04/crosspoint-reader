@@ -110,6 +110,11 @@ bool isPaired();
 // did not connect or no data arrived within timeoutMs.
 bool sync(SyncResult& out, uint32_t timeoutMs);
 
+// As sync(), but first clears every notification on the phone that passes the
+// filter and offers a clear action (never incoming calls, whose negative
+// action declines them). `out` lists what is left.
+bool clearAll(SyncResult& out, uint32_t timeoutMs);
+
 // Live session for the notifications screen: stays connected, keeps the list
 // current and can dismiss notifications on the phone.
 enum class LiveState : uint8_t { Connecting, Ready, Failed };
