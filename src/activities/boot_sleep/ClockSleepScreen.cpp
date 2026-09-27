@@ -68,7 +68,8 @@ struct Face {
   uint16_t total;
   uint8_t senderCount;
   PhoneLink::Sender senders[PhoneLink::MAX_SENDERS];
-  PhoneLink::Media media;  // now playing, shown while something plays
+  PhoneLink::Media media;   // now playing, shown while something plays
+  bool initialSyncPending;  // first timer wake comes at once, to sync the phone
 };
 
 // Whether the face lists anything under the clock (which then moves up).
@@ -467,6 +468,8 @@ bool render(GfxRenderer& renderer) {
   snprintf(face.posixTz, sizeof(face.posixTz), "%s", tz ? tz : "");
   face.phoneSync = PhoneLink::isAvailable() && PhoneLink::isPaired();
   face.phoneFailures = 0;
+  // Sync right after going to sleep rather than a minute later.
+  face.initialSyncPending = face.phoneSync;
   face.notificationCount = 0;
   face.summary = PhoneLink::detail() == PhoneLink::Detail::SenderAndApp;
   face.total = 0;
@@ -520,6 +523,19 @@ void update(GfxRenderer& renderer, const struct tm& now) {
   } else {
     renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
   }
+}
+
+bool takeInitialSync() {
+  const bool pending = face.initialSyncPending;
+  face.initialSyncPending = false;
+  return pending;
+}
+
+void restoreBaseline(GfxRenderer& renderer) {
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  renderer.clearScreen();
+  drawFace(renderer, face);
+  renderer.cleanupGrayscaleWithFrameBuffer();
 }
 
 bool phoneSyncDue(const struct tm& now) {
@@ -615,7 +631,8 @@ bool armWakeTimer() {
     LOG_ERR("CLK", "Clock sleep screen: RTC read failed, not arming wake timer");
     return false;
   }
-  const uint64_t untilNextMinuteUs = needsRepaint(now) ? 0 : static_cast<uint64_t>(60 - now.tm_sec) * US_PER_SECOND;
+  const uint64_t untilNextMinuteUs =
+      needsRepaint(now) || face.initialSyncPending ? 0 : static_cast<uint64_t>(60 - now.tm_sec) * US_PER_SECOND;
   const uint64_t delayUs = untilNextMinuteUs + WAKE_MARGIN_US;
   esp_sleep_enable_timer_wakeup(delayUs);
   LOG_DBG("CLK", "Clock sleep screen: next wake in %lu ms", static_cast<unsigned long>(delayUs / 1000));

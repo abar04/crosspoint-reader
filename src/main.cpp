@@ -325,16 +325,23 @@ static void serviceClockSleepWake() {
     return;
   }
 
-  // An early timer wake leaves the display asleep and just re-arms.
-  if (ClockSleepScreen::needsRepaint(now)) {
+  // Syncs happen with each new minute, plus once right after going to sleep.
+  // An early timer wake with neither leaves the display asleep and re-arms.
+  const bool repaint = ClockSleepScreen::needsRepaint(now);
+  const bool syncDue = (ClockSleepScreen::takeInitialSync() || repaint) && ClockSleepScreen::phoneSyncDue(now);
+  if (repaint || syncDue) {
     display.begin(/*seamless=*/true);
     renderer.begin();
     renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
     renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
-    ClockSleepScreen::update(renderer, now);
+    if (repaint) {
+      ClockSleepScreen::update(renderer, now);
+    } else {
+      ClockSleepScreen::restoreBaseline(renderer);
+    }
     // The time is painted first so the minute lands on schedule; the phone
     // sync then corrects the RTC and refreshes the notification list.
-    if (ClockSleepScreen::phoneSyncDue(now)) {
+    if (syncDue) {
       if (auto phone = makeUniqueNoThrow<PhoneLink::SyncResult>()) {
         const bool ok = PhoneLink::sync(*phone, PHONE_SYNC_TIMEOUT_MS);
         ClockSleepScreen::applyPhoneSync(renderer, ok, *phone);

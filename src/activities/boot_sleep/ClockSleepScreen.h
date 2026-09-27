@@ -38,6 +38,14 @@ bool needsRepaint(const struct tm& now);
 // the change; the first paint of each hour is a clean refresh instead.
 void update(GfxRenderer& renderer, const struct tm& now);
 
+// True (once) when this is the wake armed right after going to sleep, which
+// syncs the phone at once instead of waiting for the next minute.
+bool takeInitialSync();
+
+// Reloads the controller with the face on the glass, for a wake that did not
+// repaint the time but may repaint after a phone sync.
+void restoreBaseline(GfxRenderer& renderer);
+
 // True when this timer wake should sync with the paired iPhone. After repeated
 // misses it only tries every few minutes to spare the battery.
 bool phoneSyncDue(const struct tm& now);

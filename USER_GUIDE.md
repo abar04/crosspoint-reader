@@ -550,7 +550,7 @@ Clock sleep uses more battery than the other sleep screens: the X3 normally swit
 
 Pair an iPhone once under **Settings -> System -> Clock -> Pair iPhone**: open **Settings -> Bluetooth** on the iPhone, tap **CrossPoint** under Other Devices, accept the pairing request and allow notifications when asked. If the iPhone already lists CrossPoint from an earlier pairing, tap it (or choose **Forget This Device** first if it will not connect).
 
-After that, each minute of Clock sleep the X3 reconnects to the iPhone for a few seconds:
+After that, the X3 reconnects to the iPhone for a few seconds right after it goes to sleep and then each minute of Clock sleep:
 
 - The clock takes the iPhone's time and time zone, so it stays correct across travel and daylight-saving changes.
 - The four newest notifications on the iPhone are listed under the clock: the app and how long ago it arrived, the title and the first two lines. The list refreshes within seconds of each minute.
