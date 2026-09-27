@@ -25,6 +25,7 @@ enum MenuItem {
   ITEM_TIMEZONE = 0,
   ITEM_DST,
   ITEM_FORMAT,
+  ITEM_STYLE,
   ITEM_SHOW_ON_HOME,
   ITEM_SYNC,
   ITEM_PHONE,
@@ -36,16 +37,17 @@ enum MenuItem {
 };
 
 const StrId menuNames[ClockSettingsActivity::ITEM_COUNT] = {
-    StrId::STR_TIMEZONE,          StrId::STR_CLOCK_DST,
-    StrId::STR_CLOCK_FORMAT,      StrId::STR_CLOCK_IN_HEADER,
-    StrId::STR_CLOCK_SYNC_NOW,    StrId::STR_PHONE_PAIR,
-    StrId::STR_PHONE_FILTER,      StrId::STR_PHONE_DETAIL,
-    StrId::STR_PHONE_QUIET_HOURS, StrId::STR_PHONE_NOTIFICATIONS,
-    StrId::STR_PHONE_NOW_PLAYING,
+    StrId::STR_TIMEZONE,          StrId::STR_CLOCK_DST,           StrId::STR_CLOCK_FORMAT,
+    StrId::STR_CLOCK_STYLE,       StrId::STR_CLOCK_IN_HEADER,     StrId::STR_CLOCK_SYNC_NOW,
+    StrId::STR_PHONE_PAIR,        StrId::STR_PHONE_FILTER,        StrId::STR_PHONE_DETAIL,
+    StrId::STR_PHONE_QUIET_HOURS, StrId::STR_PHONE_NOTIFICATIONS, StrId::STR_PHONE_NOW_PLAYING,
 };
 
 const StrId filterNames[static_cast<int>(PhoneLink::Filter::Count)] = {
     StrId::STR_PHONE_FILTER_ALL, StrId::STR_PHONE_FILTER_MESSAGES, StrId::STR_PHONE_FILTER_MESSAGES_CALENDAR};
+
+const StrId styleNames[CrossPointSettings::CLOCK_STYLE_COUNT] = {
+    StrId::STR_CLOCK_STYLE_MODERN, StrId::STR_CLOCK_STYLE_LIGHT, StrId::STR_CLOCK_STYLE_DIGITAL};
 
 const StrId dstNames[CrossPointSettings::CLOCK_DST_MODE_COUNT] = {StrId::STR_CLOCK_DST_AUTO, StrId::STR_STATE_ON,
                                                                   StrId::STR_STATE_OFF};
@@ -85,6 +87,9 @@ void ClockSettingsActivity::activateIndex(const int index) {
       break;
     case ITEM_FORMAT:
       SETTINGS.clockFormat = (SETTINGS.clockFormat + 1) % 2;
+      break;
+    case ITEM_STYLE:
+      SETTINGS.clockStyle = (SETTINGS.clockStyle + 1) % CrossPointSettings::CLOCK_STYLE_COUNT;
       break;
     case ITEM_SHOW_ON_HOME:
       SETTINGS.clockShowInHeader = (SETTINGS.clockShowInHeader + 1) % 2;
@@ -152,6 +157,8 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
   const uint8_t dst = SETTINGS.clockDst < CrossPointSettings::CLOCK_DST_MODE_COUNT ? SETTINGS.clockDst : uint8_t{0};
   rowItems_[ITEM_DST].value = I18N.get(dstNames[dst]);
   rowItems_[ITEM_FORMAT].value = SETTINGS.clockFormat == 1 ? tr(STR_CLOCK_FORMAT_12H) : tr(STR_CLOCK_FORMAT_24H);
+  const uint8_t style = SETTINGS.clockStyle < CrossPointSettings::CLOCK_STYLE_COUNT ? SETTINGS.clockStyle : uint8_t{0};
+  rowItems_[ITEM_STYLE].value = I18N.get(styleNames[style]);
   rowItems_[ITEM_SHOW_ON_HOME].value = SETTINGS.clockShowInHeader ? tr(STR_SHOW) : tr(STR_HIDE);
   // The sync row's value is the current time itself: it confirms the sync,
   // previews format/zone changes, and reads "Not Set" until the first sync.

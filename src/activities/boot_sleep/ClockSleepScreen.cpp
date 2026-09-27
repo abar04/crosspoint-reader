@@ -11,11 +11,13 @@
 #include <esp_sleep.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
+#include "ClockDigitFaces.h"
 #include "CrossPointSettings.h"
 #include "fontIds.h"
 
@@ -70,6 +72,7 @@ struct Face {
   PhoneLink::Sender senders[PhoneLink::MAX_SENDERS];
   PhoneLink::Media media;   // now playing, shown while something plays
   bool initialSyncPending;  // first timer wake comes at once, to sync the phone
+  uint8_t style;            // CrossPointSettings::CLOCK_STYLE
 };
 
 // Whether the face lists anything under the clock (which then moves up).
@@ -205,64 +208,79 @@ const char* fitLine(const GfxRenderer& renderer, const int fontId, const EpdFont
   return text + k;
 }
 
-void drawNotifications(const GfxRenderer& renderer, const Face& f, int y) {
+// A layout pass: measures (paint = false) or draws. Content stops at `bottom`.
+struct Pen {
+  const GfxRenderer& renderer;
+  bool paint;
+  int bottom;
+};
+
+int drawNotifications(const Pen& pen, const Face& f, int y) {
+  const GfxRenderer& renderer = pen.renderer;
   const int screenW = renderer.getScreenWidth();
   const int margin = screenW / 16;
   const int width = screenW - 2 * margin;
-  const int bottom = renderer.getScreenHeight() - margin;
   const int titleH = renderer.getLineHeight(UI_12_FONT_ID);
   const int bodyH = renderer.getLineHeight(UI_10_FONT_ID);
   char line[PhoneLink::MESSAGE_LEN + 4];
 
-  for (int i = 0; i < f.notificationCount && y + 8 + titleH <= bottom; i++) {
+  for (int i = 0; i < f.notificationCount && y + 8 + titleH <= pen.bottom; i++) {
     const PhoneLink::Notification& n = f.notifications[i];
-    renderer.fillRect(margin, y, width, 1);
+    if (pen.paint) renderer.fillRect(margin, y, width, 1);
     y += 8;
     char age[16];
     PhoneLink::formatAge(age, sizeof(age), n.arrivedMinutes, f.shownMinutes);
     if (n.app[0] != '\0' || age[0] != '\0') {
-      char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
-      snprintf(meta, sizeof(meta), "%s%s%s", n.app, n.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
-      fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width, true, line, sizeof(line));
-      renderer.drawText(UI_10_FONT_ID, margin, y, line);
+      if (pen.paint) {
+        char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
+        snprintf(meta, sizeof(meta), "%s%s%s", n.app, n.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
+        fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width, true, line, sizeof(line));
+        renderer.drawText(UI_10_FONT_ID, margin, y, line);
+      }
       y += bodyH;
     }
     if (n.title[0] != '\0') {
-      fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, n.title, width, true, line, sizeof(line));
-      renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+      if (pen.paint) {
+        fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, n.title, width, true, line, sizeof(line));
+        renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+      }
       y += titleH;
     }
     const char* rest = n.message;
-    for (int l = 0; l < MESSAGE_LINES && *rest != '\0' && y + bodyH <= bottom; l++) {
+    for (int l = 0; l < MESSAGE_LINES && *rest != '\0' && y + bodyH <= pen.bottom; l++) {
       rest = fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, rest, width, l == MESSAGE_LINES - 1, line,
                      sizeof(line));
-      renderer.drawText(UI_10_FONT_ID, margin, y, line);
+      if (pen.paint) renderer.drawText(UI_10_FONT_ID, margin, y, line);
       y += bodyH;
     }
     y += 8;
   }
+  return y;
 }
 
-// Date, battery and phone-sync lines under the digits. Returns the y below them.
-int drawStatus(const GfxRenderer& renderer, const Face& f, int y) {
+// Date, battery and phone-sync lines under the time. Returns the y below them.
+int drawStatus(const Pen& pen, const Face& f, int y) {
+  const GfxRenderer& renderer = pen.renderer;
   const int dateH = renderer.getLineHeight(UI_12_FONT_ID);
   const int smallH = renderer.getLineHeight(UI_10_FONT_ID);
 
   // Days-to-civil (Howard Hinnant) for the face's local date.
   const long days = static_cast<long>(f.shownMinutes / 1440);
   if (f.shownMinutes != 0) {
-    const long z = days + 719468L;
-    const long era = (z >= 0 ? z : z - 146096L) / 146097L;
-    const unsigned doe = static_cast<unsigned>(z - era * 146097L);
-    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    const unsigned mp = (5 * doy + 2) / 153;
-    const unsigned day = doy - (153 * mp + 2) / 5 + 1;
-    const unsigned month = mp < 10 ? mp + 3 : mp - 9;
-    const int weekday = static_cast<int>((days + 4) % 7);  // 1970-01-01 was a Thursday
-    char date[64];
-    snprintf(date, sizeof(date), "%s %u %s", I18N.get(WEEKDAY_NAMES[weekday]), day, I18N.get(MONTH_NAMES[month - 1]));
-    renderer.drawCenteredText(UI_12_FONT_ID, y, date, true, EpdFontFamily::BOLD);
+    if (pen.paint) {
+      const long z = days + 719468L;
+      const long era = (z >= 0 ? z : z - 146096L) / 146097L;
+      const unsigned doe = static_cast<unsigned>(z - era * 146097L);
+      const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+      const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+      const unsigned mp = (5 * doy + 2) / 153;
+      const unsigned day = doy - (153 * mp + 2) / 5 + 1;
+      const unsigned month = mp < 10 ? mp + 3 : mp - 9;
+      const int weekday = static_cast<int>((days + 4) % 7);  // 1970-01-01 was a Thursday
+      char date[64];
+      snprintf(date, sizeof(date), "%s %u %s", I18N.get(WEEKDAY_NAMES[weekday]), day, I18N.get(MONTH_NAMES[month - 1]));
+      renderer.drawCenteredText(UI_12_FONT_ID, y, date, true, EpdFontFamily::BOLD);
+    }
     y += dateH + 4;
   }
 
@@ -276,7 +294,7 @@ int drawStatus(const GfxRenderer& renderer, const Face& f, int y) {
     snprintf(status + len, sizeof(status) - len, tr(STR_PHONE_BATTERY), static_cast<int>(f.phoneBattery));
   }
   if (status[0] != '\0') {
-    renderer.drawCenteredText(UI_10_FONT_ID, y, status);
+    if (pen.paint) renderer.drawCenteredText(UI_10_FONT_ID, y, status);
     y += smallH;
   }
 
@@ -284,99 +302,157 @@ int drawStatus(const GfxRenderer& renderer, const Face& f, int y) {
     const bool neverSynced = f.lastSyncMinutes == 0;
     const bool stale = neverSynced ? f.phoneFailures >= 2 : f.shownMinutes - f.lastSyncMinutes >= STALE_SYNC_MINUTES;
     if (stale) {
-      char line[64];
-      if (neverSynced) {
-        snprintf(line, sizeof(line), "%s", tr(STR_PHONE_NOT_FOUND));
-      } else {
-        const int hour = static_cast<int>(f.lastSyncMinutes / 60 % 24);
-        const int minute = static_cast<int>(f.lastSyncMinutes % 60);
-        char when[12];
-        if (f.use12h) {
-          snprintf(when, sizeof(when), "%d:%02d %s", hour % 12 == 0 ? 12 : hour % 12, minute, HalClock::meridiem(hour));
+      if (pen.paint) {
+        char line[64];
+        if (neverSynced) {
+          snprintf(line, sizeof(line), "%s", tr(STR_PHONE_NOT_FOUND));
         } else {
-          snprintf(when, sizeof(when), "%02d:%02d", hour, minute);
+          const int hour = static_cast<int>(f.lastSyncMinutes / 60 % 24);
+          const int minute = static_cast<int>(f.lastSyncMinutes % 60);
+          char when[12];
+          if (f.use12h) {
+            snprintf(when, sizeof(when), "%d:%02d %s", hour % 12 == 0 ? 12 : hour % 12, minute,
+                     HalClock::meridiem(hour));
+          } else {
+            snprintf(when, sizeof(when), "%02d:%02d", hour, minute);
+          }
+          snprintf(line, sizeof(line), tr(STR_PHONE_LAST_SYNC), when);
         }
-        snprintf(line, sizeof(line), tr(STR_PHONE_LAST_SYNC), when);
+        renderer.drawCenteredText(UI_10_FONT_ID, y, line);
       }
-      renderer.drawCenteredText(UI_10_FONT_ID, y, line);
       y += smallH;
     }
   }
 
   if (f.phoneSync && PhoneLink::isPlaying(f.media)) {
-    const int width = renderer.getScreenWidth() - 2 * (renderer.getScreenWidth() / 16);
-    char line[sizeof(f.media.title) + 4];
     y += 6;
-    fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, f.media.title, width, true, line, sizeof(line));
-    renderer.drawCenteredText(UI_12_FONT_ID, y, line, true, EpdFontFamily::BOLD);
-    y += dateH;
     char byline[sizeof(f.media.artist) + sizeof(f.media.player) + 8];
     snprintf(byline, sizeof(byline), "%s%s%s", f.media.artist,
              f.media.artist[0] != '\0' && f.media.player[0] != '\0' ? " \xC2\xB7 " : "", f.media.player);
-    if (byline[0] != '\0') {
-      char fitted[sizeof(byline) + 4];
-      fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, byline, width, true, fitted, sizeof(fitted));
-      renderer.drawCenteredText(UI_10_FONT_ID, y, fitted);
-      y += smallH;
+    if (pen.paint) {
+      const int width = renderer.getScreenWidth() - 2 * (renderer.getScreenWidth() / 16);
+      char line[sizeof(f.media.title) + 4];
+      fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, f.media.title, width, true, line, sizeof(line));
+      renderer.drawCenteredText(UI_12_FONT_ID, y, line, true, EpdFontFamily::BOLD);
+      if (byline[0] != '\0') {
+        char fitted[sizeof(byline) + 4];
+        fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, byline, width, true, fitted, sizeof(fitted));
+        renderer.drawCenteredText(UI_10_FONT_ID, y + dateH, fitted);
+      }
     }
+    y += dateH;
+    if (byline[0] != '\0') y += smallH;
   }
   return y;
 }
 
 // Sender & app mode: "6 notifications", then one line per notification with
 // the sender on the left and "App · 5m" on the right; no message text.
-void drawSummary(const GfxRenderer& renderer, const Face& f, int y) {
+int drawSummary(const Pen& pen, const Face& f, int y) {
+  const GfxRenderer& renderer = pen.renderer;
   const int screenW = renderer.getScreenWidth();
   const int margin = screenW / 16;
   const int width = screenW - 2 * margin;
-  const int bottom = renderer.getScreenHeight() - margin;
   const int titleH = renderer.getLineHeight(UI_12_FONT_ID);
   const int rowH = titleH + 6;
   char line[PhoneLink::TITLE_LEN + 8];
 
-  renderer.fillRect(margin, y, width, 1);
   y += 8;
-  if (f.total == 1) {
-    snprintf(line, sizeof(line), "%s", tr(STR_NOTIFICATION_COUNT_ONE));
-  } else {
-    snprintf(line, sizeof(line), tr(STR_NOTIFICATION_COUNT), static_cast<int>(f.total));
+  if (pen.paint) {
+    renderer.fillRect(margin, y - 8, width, 1);
+    if (f.total == 1) {
+      snprintf(line, sizeof(line), "%s", tr(STR_NOTIFICATION_COUNT_ONE));
+    } else {
+      snprintf(line, sizeof(line), tr(STR_NOTIFICATION_COUNT), static_cast<int>(f.total));
+    }
+    renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
   }
-  renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
   y += rowH;
 
   int listed = 0;
-  for (int i = 0; i < f.senderCount && y + titleH <= bottom; i++) {
-    const PhoneLink::Sender& s = f.senders[i];
-    char age[16];
-    PhoneLink::formatAge(age, sizeof(age), s.arrivedMinutes, f.shownMinutes);
-    char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
-    snprintf(meta, sizeof(meta), "%s%s%s", s.app, s.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
-    // The app and age keep at most half the row; the sender gets the rest.
-    char right[sizeof(meta)];
-    fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width / 2, true, right, sizeof(right));
-    const int rightW = right[0] != '\0' ? renderer.getTextWidth(UI_10_FONT_ID, right) : 0;
-    fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, s.title[0] != '\0' ? s.title : tr(STR_OTHER_APPS),
-            width - rightW - 16, true, line, sizeof(line));
-    renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
-    if (rightW > 0) {
-      const int baselineShift = titleH - renderer.getLineHeight(UI_10_FONT_ID);
-      renderer.drawText(UI_10_FONT_ID, margin + width - rightW, y + baselineShift, right);
+  for (int i = 0; i < f.senderCount && y + titleH <= pen.bottom; i++) {
+    if (pen.paint) {
+      const PhoneLink::Sender& s = f.senders[i];
+      char age[16];
+      PhoneLink::formatAge(age, sizeof(age), s.arrivedMinutes, f.shownMinutes);
+      char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
+      snprintf(meta, sizeof(meta), "%s%s%s", s.app, s.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
+      // The app and age keep at most half the row; the sender gets the rest.
+      char right[sizeof(meta)];
+      fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width / 2, true, right, sizeof(right));
+      const int rightW = right[0] != '\0' ? renderer.getTextWidth(UI_10_FONT_ID, right) : 0;
+      fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, s.title[0] != '\0' ? s.title : tr(STR_OTHER_APPS),
+              width - rightW - 16, true, line, sizeof(line));
+      renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+      if (rightW > 0) {
+        const int baselineShift = titleH - renderer.getLineHeight(UI_10_FONT_ID);
+        renderer.drawText(UI_10_FONT_ID, margin + width - rightW, y + baselineShift, right);
+      }
     }
     listed++;
     y += rowH;
   }
-  if (f.total > listed && y + titleH <= bottom) {
-    snprintf(line, sizeof(line), tr(STR_MORE_COUNT), static_cast<int>(f.total - listed));
-    renderer.drawText(UI_12_FONT_ID, margin, y, line);
+  if (f.total > listed && y + titleH <= pen.bottom) {
+    if (pen.paint) {
+      snprintf(line, sizeof(line), tr(STR_MORE_COUNT), static_cast<int>(f.total - listed));
+      renderer.drawText(UI_12_FONT_ID, margin, y, line);
+    }
+    y += titleH;
+  }
+  return y;
+}
+
+const ClockDigitFace* digitFaceFor(const uint8_t style) {
+  switch (style) {
+    case CrossPointSettings::CLOCK_STYLE_MODERN:
+      return &CLOCK_DIGITS_SEMIBOLD;
+    case CrossPointSettings::CLOCK_STYLE_LIGHT:
+      return &CLOCK_DIGITS_LIGHT;
+    default:
+      return nullptr;
   }
 }
 
-// Deterministic for a given face: update() redraws the previous minute to
-// rebuild the controller baseline, so the pixels must match the earlier paint.
-// With notifications the clock moves to the top and the list fills the rest.
-void drawFace(const GfxRenderer& renderer, const Face& f) {
-  const Metrics m = metricsFor(renderer);
+// Draws the glyph's set bits as horizontal runs.
+void drawDigitGlyph(const GfxRenderer& renderer, const ClockDigitFace& font, const int index, const int penX,
+                    const int y) {
+  const ClockDigitGlyph& g = font.glyphs[index];
+  const uint8_t* row = font.bitmap + g.offset;
+  const int rowBytes = (g.width + 7) / 8;
+  const int x0 = penX + g.left;
+  const int y0 = y + g.top;
+  for (int dy = 0; dy < g.height; dy++, row += rowBytes) {
+    int runStart = -1;
+    for (int dx = 0; dx <= g.width; dx++) {
+      const bool ink = dx < g.width && (row[dx >> 3] & (0x80 >> (dx & 7)));
+      if (ink && runStart < 0) {
+        runStart = dx;
+      } else if (!ink && runStart >= 0) {
+        renderer.fillRect(x0 + runStart, y0 + dy, dx - runStart, 1);
+        runStart = -1;
+      }
+    }
+  }
+}
 
+// Draws glyph indices as a line whose ink is centred on the screen.
+void drawDigitLine(const GfxRenderer& renderer, const ClockDigitFace& font, const int* indices, const int count,
+                   const int y) {
+  int inkW = 0;
+  for (int i = 0; i < count - 1; i++) inkW += font.glyphs[indices[i]].advance;
+  const ClockDigitGlyph& first = font.glyphs[indices[0]];
+  const ClockDigitGlyph& last = font.glyphs[indices[count - 1]];
+  inkW += last.left + last.width - first.left;
+  int penX = (renderer.getScreenWidth() - inkW) / 2 - first.left;
+  for (int i = 0; i < count; i++) {
+    drawDigitGlyph(renderer, font, indices[i], penX, y);
+    penX += font.glyphs[indices[i]].advance;
+  }
+}
+
+// The time, plus the AM/PM marker under its right end. Returns the y below it.
+int drawTime(const Pen& pen, const Face& f, const int y) {
+  const GfxRenderer& renderer = pen.renderer;
   int hour = f.hour;
   if (f.use12h) {
     hour %= 12;
@@ -384,63 +460,118 @@ void drawFace(const GfxRenderer& renderer, const Face& f) {
   }
   // 24-hour time keeps its leading zero; 12-hour time drops it.
   const bool twoHourDigits = !f.use12h || hour >= 10;
-  const int hourW = twoHourDigits ? 2 * m.digitW + m.pairGap : m.digitW;
-  const int faceW = hourW + m.colonW + 2 * m.digitW + m.pairGap;
+  int right;
+  int height;
 
-  int x = (renderer.getScreenWidth() - faceW) / 2;
-  const int y = hasList(f) ? renderer.getScreenHeight() / 12 : (renderer.getScreenHeight() - m.digitH) / 2;
-  int belowClock = y + m.digitH;
-
-  if (twoHourDigits) {
-    drawDigit(renderer, m, x, y, hour / 10);
-    x += m.digitW + m.pairGap;
-  }
-  drawDigit(renderer, m, x, y, hour % 10);
-  x += m.digitW;
-
-  drawColon(renderer, m, x, y);
-  x += m.colonW;
-
-  drawDigit(renderer, m, x, y, f.minute / 10);
-  x += m.digitW + m.pairGap;
-  drawDigit(renderer, m, x, y, f.minute % 10);
-
-  if (f.use12h) {
-    const char* marker = HalClock::meridiem(f.hour);
-    const int markerX = x + m.digitW - renderer.getTextWidth(UI_12_FONT_ID, marker, EpdFontFamily::BOLD);
-    renderer.drawText(UI_12_FONT_ID, markerX, y + m.digitH + m.digitH / 10, marker, true, EpdFontFamily::BOLD);
-    belowClock += m.digitH / 10 + renderer.getLineHeight(UI_12_FONT_ID);
-  }
-  belowClock += m.digitH / 10;
-  belowClock = drawStatus(renderer, f, belowClock);
-  if (f.summary) {
-    if (f.total > 0) drawSummary(renderer, f, belowClock + m.digitH / 6);
+  if (const ClockDigitFace* font = digitFaceFor(f.style)) {
+    int indices[5];
+    int count = 0;
+    if (twoHourDigits) indices[count++] = hour / 10;
+    indices[count++] = hour % 10;
+    indices[count++] = CLOCK_DIGIT_COLON;
+    indices[count++] = f.minute / 10;
+    indices[count++] = f.minute % 10;
+    if (pen.paint) drawDigitLine(renderer, *font, indices, count, y);
+    int inkW = 0;
+    for (int i = 0; i < count - 1; i++) inkW += font->glyphs[indices[i]].advance;
+    inkW +=
+        font->glyphs[indices[count - 1]].left + font->glyphs[indices[count - 1]].width - font->glyphs[indices[0]].left;
+    right = (renderer.getScreenWidth() + inkW) / 2;
+    height = font->height;
   } else {
-    drawNotifications(renderer, f, belowClock + m.digitH / 6);
+    const Metrics m = metricsFor(renderer);
+    const int hourW = twoHourDigits ? 2 * m.digitW + m.pairGap : m.digitW;
+    const int faceW = hourW + m.colonW + 2 * m.digitW + m.pairGap;
+    int x = (renderer.getScreenWidth() - faceW) / 2;
+    if (pen.paint) {
+      if (twoHourDigits) {
+        drawDigit(renderer, m, x, y, hour / 10);
+        x += m.digitW + m.pairGap;
+      }
+      drawDigit(renderer, m, x, y, hour % 10);
+      x += m.digitW;
+      drawColon(renderer, m, x, y);
+      x += m.colonW;
+      drawDigit(renderer, m, x, y, f.minute / 10);
+      x += m.digitW + m.pairGap;
+      drawDigit(renderer, m, x, y, f.minute % 10);
+    }
+    right = (renderer.getScreenWidth() + faceW) / 2;
+    height = m.digitH;
   }
+
+  int below = y + height;
+  if (f.use12h) {
+    below += height / 10;
+    if (pen.paint) {
+      const char* marker = HalClock::meridiem(f.hour);
+      const int markerX = right - renderer.getTextWidth(UI_12_FONT_ID, marker, EpdFontFamily::BOLD);
+      renderer.drawText(UI_12_FONT_ID, markerX, below, marker, true, EpdFontFamily::BOLD);
+    }
+    below += renderer.getLineHeight(UI_12_FONT_ID);
+  }
+  return below + height / 10;
+}
+
+int timeHeight(const GfxRenderer& renderer, const Face& f) {
+  const ClockDigitFace* font = digitFaceFor(f.style);
+  return font ? font->height : metricsFor(renderer).digitH;
+}
+
+// Time, status and list from `y`. Returns the y below the last line.
+int layoutFace(const Pen& pen, const Face& f, int y) {
+  y = drawTime(pen, f, y);
+  y = drawStatus(pen, f, y);
+  if (!hasList(f)) return y;
+  y += timeHeight(pen.renderer, f) / 6;
+  return f.summary ? drawSummary(pen, f, y) : drawNotifications(pen, f, y);
+}
+
+// Deterministic for a given face: update() redraws the previous minute to
+// rebuild the controller baseline, so the pixels must match the earlier paint.
+// Everything is centred as one block; a list too long for the screen starts
+// at the top margin and is cut off at the bottom one.
+void drawFace(const GfxRenderer& renderer, const Face& f) {
+  const int margin = renderer.getScreenWidth() / 16;
+  const int bottom = renderer.getScreenHeight() - margin;
+
+  // A list is measured to its natural end, not to the screen's.
+  const int height = layoutFace(Pen{renderer, false, INT_MAX / 2}, f, 0);
+
+  const int top = std::max(margin, (renderer.getScreenHeight() - height) / 2);
+  layoutFace(Pen{renderer, true, bottom}, f, top);
 }
 
 // "--:--" with a note, for an RTC that has no valid time (never set, or its
 // backup supply ran out).
-void drawUnsetFace(const GfxRenderer& renderer) {
-  const Metrics m = metricsFor(renderer);
-  const int pairW = 2 * m.digitW + m.pairGap;
-  int x = (renderer.getScreenWidth() - (2 * pairW + m.colonW)) / 2;
-  const int y = (renderer.getScreenHeight() - m.digitH) / 2;
-  for (int pair = 0; pair < 2; pair++) {
-    drawSegments(renderer, m, x, y, SEG_G);
-    drawSegments(renderer, m, x + m.digitW + m.pairGap, y, SEG_G);
-    x += pairW;
-    if (pair == 0) {
-      drawColon(renderer, m, x, y);
-      x += m.colonW;
+void drawUnsetFace(const GfxRenderer& renderer, const uint8_t style) {
+  int y;
+  int height;
+  if (const ClockDigitFace* font = digitFaceFor(style)) {
+    height = font->height;
+    y = (renderer.getScreenHeight() - height) / 2;
+    const int indices[5] = {CLOCK_DIGIT_DASH, CLOCK_DIGIT_DASH, CLOCK_DIGIT_COLON, CLOCK_DIGIT_DASH, CLOCK_DIGIT_DASH};
+    drawDigitLine(renderer, *font, indices, 5, y);
+  } else {
+    const Metrics m = metricsFor(renderer);
+    height = m.digitH;
+    y = (renderer.getScreenHeight() - height) / 2;
+    const int pairW = 2 * m.digitW + m.pairGap;
+    int x = (renderer.getScreenWidth() - (2 * pairW + m.colonW)) / 2;
+    for (int pair = 0; pair < 2; pair++) {
+      drawSegments(renderer, m, x, y, SEG_G);
+      drawSegments(renderer, m, x + m.digitW + m.pairGap, y, SEG_G);
+      x += pairW;
+      if (pair == 0) {
+        drawColon(renderer, m, x, y);
+        x += m.colonW;
+      }
     }
   }
   char note[64];
   snprintf(note, sizeof(note), "%s: %s", tr(STR_CLOCK), tr(STR_NOT_SET));
-  renderer.drawCenteredText(UI_12_FONT_ID, y + m.digitH + m.digitH / 5, note, true, EpdFontFamily::BOLD);
+  renderer.drawCenteredText(UI_12_FONT_ID, y + height + height / 5, note, true, EpdFontFamily::BOLD);
 }
-
 }  // namespace
 
 bool isSupported() { return gpio.deviceIsX3() && halClock.isAvailable(); }
@@ -455,7 +586,7 @@ bool render(GfxRenderer& renderer) {
   if (!halClock.localTime(now, /*fresh=*/true)) {
     // No wake timer: there is no time to keep updated.
     LOG_ERR("CLK", "Clock sleep screen: RTC has no valid time");
-    drawUnsetFace(renderer);
+    drawUnsetFace(renderer, SETTINGS.clockStyle);
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     return true;
   }
@@ -464,6 +595,7 @@ bool render(GfxRenderer& renderer) {
   face.minute = static_cast<uint8_t>(now.tm_min);
   face.shownMinutes = PhoneLink::localMinutes(now);
   face.use12h = SETTINGS.clockFormat == 1;
+  face.style = SETTINGS.clockStyle;
   const char* tz = getenv("TZ");
   snprintf(face.posixTz, sizeof(face.posixTz), "%s", tz ? tz : "");
   face.phoneSync = PhoneLink::isAvailable() && PhoneLink::isPaired();

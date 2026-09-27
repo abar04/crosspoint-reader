@@ -486,6 +486,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_CLOCK_DST, &CrossPointSettings::clockDst,
                           {StrId::STR_CLOCK_DST_AUTO, StrId::STR_STATE_ON, StrId::STR_STATE_OFF}, "clockDst",
                           StrId::STR_CUSTOMISE_STATUS_BAR),
+        SettingInfo::Enum(StrId::STR_CLOCK_STYLE, &CrossPointSettings::clockStyle,
+                          {StrId::STR_CLOCK_STYLE_MODERN, StrId::STR_CLOCK_STYLE_LIGHT, StrId::STR_CLOCK_STYLE_DIGITAL},
+                          "clockStyle", StrId::STR_CUSTOMISE_STATUS_BAR),
         SettingInfo::Toggle(StrId::STR_CLOCK_IN_HEADER, &CrossPointSettings::clockShowInHeader, "clockShowHeader",
                             StrId::STR_CUSTOMISE_STATUS_BAR),
         // Persistence flag for NTP debounce. Resetting from the web UI forces a re-sync
