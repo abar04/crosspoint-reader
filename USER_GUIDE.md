@@ -544,7 +544,7 @@ The **Sleep Screen** setting controls what is displayed when the device goes to 
 
 The **Clock** sleep screen is available on the X3, which has a battery-backed real-time clock. The device wakes briefly once a minute to redraw the digits and goes straight back to sleep, without loading books or the SD card. It uses the timezone and 12/24-hour format from **Settings -> System -> Clock**; set the time there with **Sync Clock Now** first. Until the clock has a valid time, the sleep screen shows `--:--` and "Clock: Not Set" and does not update. The first update of each hour refreshes the whole screen to clear ghosting.
 
-**Clock Style** in the same menu picks the digits: **Modern** (Inter SemiBold, the default), **Light** (Inter Light) or **Digital** (seven-segment). The time, date and status lines are centred on the screen together; with notifications listed, the whole group is centred and a list too long for the screen starts at the top.
+**Clock Style** in the same menu picks the digits: **Modern** (Inter SemiBold, the default), **Light** (Inter Light) or **Digital** (seven-segment). The time always has two hour digits (09:41, also in 12-hour format) and every digit takes the same width, so the colon stays in the same place. The time, date and status lines are centred on the screen together; with notifications listed, the whole group is centred and a list too long for the screen starts at the top.
 
 Clock sleep uses more battery than the other sleep screens: the X3 normally switches its battery off while asleep, but it has to stay powered for the clock to keep waking up.
 

@@ -110,8 +110,7 @@ struct Metrics {
   int colonW;   // colon slot, including its side spacing
 };
 
-// Sized for four digits so the face keeps its size when a 12-hour clock goes
-// from 9:59 to 10:00. The widest face is 5 digit widths.
+// Sized for HH:MM, which is 5 digit widths wide.
 Metrics metricsFor(const GfxRenderer& renderer) {
   const int screenW = renderer.getScreenWidth();
   const int margin = screenW / 16;
@@ -435,22 +434,37 @@ void drawDigitGlyph(const GfxRenderer& renderer, const ClockDigitFace& font, con
   }
 }
 
-// Draws glyph indices as a line whose ink is centred on the screen.
-void drawDigitLine(const GfxRenderer& renderer, const ClockDigitFace& font, const int* indices, const int count,
-                   const int y) {
-  int inkW = 0;
-  for (int i = 0; i < count - 1; i++) inkW += font.glyphs[indices[i]].advance;
-  const ClockDigitGlyph& first = font.glyphs[indices[0]];
-  const ClockDigitGlyph& last = font.glyphs[indices[count - 1]];
-  inkW += last.left + last.width - first.left;
-  int penX = (renderer.getScreenWidth() - inkW) / 2 - first.left;
-  for (int i = 0; i < count; i++) {
-    drawDigitGlyph(renderer, font, indices[i], penX, y);
-    penX += font.glyphs[indices[i]].advance;
-  }
+// Every digit gets the widest digit's slot, so HH:MM keeps one width and the
+// colon stays put from minute to minute.
+int digitSlot(const ClockDigitFace& font) {
+  int slot = 0;
+  for (int d = 0; d < 10; d++) slot = std::max(slot, static_cast<int>(font.glyphs[d].advance));
+  return slot;
 }
 
-// The time, plus the AM/PM marker under its right end. Returns the y below it.
+int slotWidth(const ClockDigitFace& font, const int index) {
+  return index < 10 ? digitSlot(font) : font.glyphs[index].advance;
+}
+
+// Draws glyph indices centred in their slots, the whole line centred on the
+// screen. Returns the line's width.
+int drawDigitLine(const GfxRenderer& renderer, const ClockDigitFace& font, const int* indices, const int count,
+                  const int y, const bool paint) {
+  int lineW = 0;
+  for (int i = 0; i < count; i++) lineW += slotWidth(font, indices[i]);
+  if (!paint) return lineW;
+  int x = (renderer.getScreenWidth() - lineW) / 2;
+  for (int i = 0; i < count; i++) {
+    const ClockDigitGlyph& g = font.glyphs[indices[i]];
+    const int slot = slotWidth(font, indices[i]);
+    drawDigitGlyph(renderer, font, indices[i], x + (slot - g.width) / 2 - g.left, y);
+    x += slot;
+  }
+  return lineW;
+}
+
+// The time as HH:MM (12-hour time keeps its leading zero too), plus the AM/PM
+// marker under its right end. Returns the y below it.
 int drawTime(const Pen& pen, const Face& f, const int y) {
   const GfxRenderer& renderer = pen.renderer;
   int hour = f.hour;
@@ -458,43 +472,27 @@ int drawTime(const Pen& pen, const Face& f, const int y) {
     hour %= 12;
     if (hour == 0) hour = 12;
   }
-  // 24-hour time keeps its leading zero; 12-hour time drops it.
-  const bool twoHourDigits = !f.use12h || hour >= 10;
   int right;
   int height;
 
   if (const ClockDigitFace* font = digitFaceFor(f.style)) {
-    int indices[5];
-    int count = 0;
-    if (twoHourDigits) indices[count++] = hour / 10;
-    indices[count++] = hour % 10;
-    indices[count++] = CLOCK_DIGIT_COLON;
-    indices[count++] = f.minute / 10;
-    indices[count++] = f.minute % 10;
-    if (pen.paint) drawDigitLine(renderer, *font, indices, count, y);
-    int inkW = 0;
-    for (int i = 0; i < count - 1; i++) inkW += font->glyphs[indices[i]].advance;
-    inkW +=
-        font->glyphs[indices[count - 1]].left + font->glyphs[indices[count - 1]].width - font->glyphs[indices[0]].left;
-    right = (renderer.getScreenWidth() + inkW) / 2;
+    const int indices[5] = {hour / 10, hour % 10, CLOCK_DIGIT_COLON, f.minute / 10, f.minute % 10};
+    const int lineW = drawDigitLine(renderer, *font, indices, 5, y, pen.paint);
+    right = (renderer.getScreenWidth() + lineW) / 2;
     height = font->height;
   } else {
     const Metrics m = metricsFor(renderer);
-    const int hourW = twoHourDigits ? 2 * m.digitW + m.pairGap : m.digitW;
-    const int faceW = hourW + m.colonW + 2 * m.digitW + m.pairGap;
+    const int pairW = 2 * m.digitW + m.pairGap;
+    const int faceW = 2 * pairW + m.colonW;
     int x = (renderer.getScreenWidth() - faceW) / 2;
     if (pen.paint) {
-      if (twoHourDigits) {
-        drawDigit(renderer, m, x, y, hour / 10);
-        x += m.digitW + m.pairGap;
-      }
-      drawDigit(renderer, m, x, y, hour % 10);
-      x += m.digitW;
+      drawDigit(renderer, m, x, y, hour / 10);
+      drawDigit(renderer, m, x + m.digitW + m.pairGap, y, hour % 10);
+      x += pairW;
       drawColon(renderer, m, x, y);
       x += m.colonW;
       drawDigit(renderer, m, x, y, f.minute / 10);
-      x += m.digitW + m.pairGap;
-      drawDigit(renderer, m, x, y, f.minute % 10);
+      drawDigit(renderer, m, x + m.digitW + m.pairGap, y, f.minute % 10);
     }
     right = (renderer.getScreenWidth() + faceW) / 2;
     height = m.digitH;
@@ -551,7 +549,7 @@ void drawUnsetFace(const GfxRenderer& renderer, const uint8_t style) {
     height = font->height;
     y = (renderer.getScreenHeight() - height) / 2;
     const int indices[5] = {CLOCK_DIGIT_DASH, CLOCK_DIGIT_DASH, CLOCK_DIGIT_COLON, CLOCK_DIGIT_DASH, CLOCK_DIGIT_DASH};
-    drawDigitLine(renderer, *font, indices, 5, y);
+    drawDigitLine(renderer, *font, indices, 5, y, true);
   } else {
     const Metrics m = metricsFor(renderer);
     height = m.digitH;
