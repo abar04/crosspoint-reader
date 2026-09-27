@@ -68,6 +68,7 @@ struct Face {
   uint16_t total;
   uint8_t senderCount;
   PhoneLink::Sender senders[PhoneLink::MAX_SENDERS];
+  PhoneLink::Media media;  // now playing, shown while something plays
 };
 
 // Whether the face lists anything under the clock (which then moves up).
@@ -300,6 +301,24 @@ int drawStatus(const GfxRenderer& renderer, const Face& f, int y) {
       y += smallH;
     }
   }
+
+  if (f.phoneSync && PhoneLink::isPlaying(f.media)) {
+    const int width = renderer.getScreenWidth() - 2 * (renderer.getScreenWidth() / 16);
+    char line[sizeof(f.media.title) + 4];
+    y += 6;
+    fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, f.media.title, width, true, line, sizeof(line));
+    renderer.drawCenteredText(UI_12_FONT_ID, y, line, true, EpdFontFamily::BOLD);
+    y += dateH;
+    char byline[sizeof(f.media.artist) + sizeof(f.media.player) + 8];
+    snprintf(byline, sizeof(byline), "%s%s%s", f.media.artist,
+             f.media.artist[0] != '\0' && f.media.player[0] != '\0' ? " \xC2\xB7 " : "", f.media.player);
+    if (byline[0] != '\0') {
+      char fitted[sizeof(byline) + 4];
+      fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, byline, width, true, fitted, sizeof(fitted));
+      renderer.drawCenteredText(UI_10_FONT_ID, y, fitted);
+      y += smallH;
+    }
+  }
   return y;
 }
 
@@ -452,6 +471,7 @@ bool render(GfxRenderer& renderer) {
   face.summary = PhoneLink::detail() == PhoneLink::Detail::SenderAndApp;
   face.total = 0;
   face.senderCount = 0;
+  memset(&face.media, 0, sizeof(face.media));
   face.phoneBattery = -1;
   face.shownMinutes = PhoneLink::localMinutes(now);
   face.language = SETTINGS.language;
@@ -534,6 +554,15 @@ void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncR
   }
 
   bool changed = false;
+  if (result.media.known && memcmp(&result.media, &face.media, sizeof(face.media)) != 0) {
+    // Only the title/artist/player lines show, so an album-only change skips the repaint.
+    const bool visibleChange = PhoneLink::isPlaying(result.media) != PhoneLink::isPlaying(face.media) ||
+                               strcmp(result.media.title, face.media.title) != 0 ||
+                               strcmp(result.media.artist, face.media.artist) != 0 ||
+                               strcmp(result.media.player, face.media.player) != 0;
+    face.media = result.media;
+    if (visibleChange) changed = true;
+  }
   if (result.phoneBattery >= 0 && result.phoneBattery != face.phoneBattery) {
     face.phoneBattery = result.phoneBattery;
     changed = true;

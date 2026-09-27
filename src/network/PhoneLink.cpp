@@ -93,6 +93,8 @@ int liveSnapshot(Notification*, int, int8_t& battery) {
   return 0;
 }
 bool dismiss(uint32_t) { return false; }
+void liveMedia(Media& out) { out = Media{}; }
+bool mediaCommand(MediaCommand) { return false; }
 void stopLive() {}
 
 #else
@@ -191,6 +193,9 @@ struct Session {
   uint16_t svcStart, svcEnd;
   uint16_t ctsTime, ctsLocalInfo;
   Chr ancsNs, ancsDs, ancsCp;
+  Chr amsRc, amsEu;
+  uint16_t amsEuCccd;
+  Media media;
   uint16_t nsCccd, dsCccd;
 
   uint8_t localTime[10];
@@ -369,6 +374,7 @@ int onCtsService(uint16_t conn, const ble_gatt_error* error, const ble_gatt_svc*
 // ---- Battery ----
 
 void startAncsDiscovery(uint16_t conn);
+void startAmsDiscovery(uint16_t conn);
 
 int onBatteryRead(uint16_t conn, const ble_gatt_error* error, ble_gatt_attr* attr, void*) {
   uint8_t level = 0;
@@ -377,7 +383,7 @@ int onBatteryRead(uint16_t conn, const ble_gatt_error* error, ble_gatt_attr* att
     session->phoneBattery = static_cast<int8_t>(level);
     if (session->out) session->out->phoneBattery = static_cast<int8_t>(level);
   }
-  startAncsDiscovery(conn);
+  startAmsDiscovery(conn);
   return 0;
 }
 
@@ -389,7 +395,7 @@ int onBatteryChr(uint16_t conn, const ble_gatt_error* error, const ble_gatt_chr*
     return 0;
   }
   if (session->batteryLevel && ble_gattc_read(conn, session->batteryLevel, onBatteryRead, nullptr) == 0) return 0;
-  startAncsDiscovery(conn);
+  startAmsDiscovery(conn);
   return 0;
 }
 
@@ -404,15 +410,135 @@ int onBatteryService(uint16_t conn, const ble_gatt_error* error, const ble_gatt_
     return 0;
   }
   LOG_INF("BLE", "Phone link: no Battery Service");
-  startAncsDiscovery(conn);
+  startAmsDiscovery(conn);
   return 0;
 }
 
 void startBatteryDiscovery(const uint16_t conn) {
   session->svcStart = session->svcEnd = 0;
   if (ble_gattc_disc_svc_by_uuid(conn, &BATTERY_SERVICE.u, onBatteryService, nullptr) != 0) {
-    startAncsDiscovery(conn);
+    startAmsDiscovery(conn);
   }
+}
+
+// ---- AMS (now playing) ----
+
+const ble_uuid128_t AMS_SERVICE =
+    BLE_UUID128_INIT(0xDC, 0xF8, 0x55, 0xAD, 0x02, 0xC5, 0xF4, 0x8E, 0x3A, 0x43, 0x36, 0x0F, 0x2B, 0x50, 0xD3, 0x89);
+const ble_uuid128_t AMS_REMOTE_COMMAND =
+    BLE_UUID128_INIT(0xC2, 0x51, 0xCA, 0xF7, 0x56, 0x0E, 0xDF, 0xB8, 0x8A, 0x4A, 0xB1, 0x57, 0xD8, 0x81, 0x3C, 0x9B);
+const ble_uuid128_t AMS_ENTITY_UPDATE =
+    BLE_UUID128_INIT(0x02, 0xC1, 0x96, 0xBA, 0x92, 0xBB, 0x0C, 0x9A, 0x1F, 0x41, 0x8D, 0x80, 0xCE, 0xAB, 0x7C, 0x2F);
+constexpr uint8_t AMS_ENTITY_PLAYER = 0;
+constexpr uint8_t AMS_ENTITY_TRACK = 2;
+constexpr uint8_t AMS_PLAYER_NAME = 0;
+constexpr uint8_t AMS_PLAYER_PLAYBACK_INFO = 1;  // "state,rate,elapsed"
+constexpr uint8_t AMS_TRACK_ARTIST = 0;
+constexpr uint8_t AMS_TRACK_ALBUM = 1;
+constexpr uint8_t AMS_TRACK_TITLE = 2;
+
+void copyAttribute(char* dst, size_t dstSize, const uint8_t* src, uint16_t len);
+
+// Entity Update notification: EntityID, AttributeID, EntityUpdateFlags, value.
+void onEntityUpdate(const uint8_t* d, const uint16_t len) {
+  if (len < 3) return;
+  SessionLock lock;
+  Media& m = session->media;
+  const uint8_t* value = d + 3;
+  const uint16_t valueLen = len - 3;
+  if (d[0] == AMS_ENTITY_TRACK) {
+    if (d[1] == AMS_TRACK_ARTIST) copyAttribute(m.artist, sizeof(m.artist), value, valueLen);
+    if (d[1] == AMS_TRACK_ALBUM) copyAttribute(m.album, sizeof(m.album), value, valueLen);
+    if (d[1] == AMS_TRACK_TITLE) copyAttribute(m.title, sizeof(m.title), value, valueLen);
+  } else if (d[0] == AMS_ENTITY_PLAYER) {
+    if (d[1] == AMS_PLAYER_NAME) copyAttribute(m.player, sizeof(m.player), value, valueLen);
+    if (d[1] == AMS_PLAYER_PLAYBACK_INFO) {
+      m.playback = valueLen > 0 && value[0] >= '0' && value[0] <= '9' ? value[0] - '0' : 0;
+    }
+  }
+  m.known = true;
+  if (session->out) session->out->media = m;
+}
+
+uint16_t amsEuEnd() {
+  const Chr& rc = session->amsRc;
+  const uint16_t eu = session->amsEu.valHandle;
+  return rc.defHandle > eu && rc.defHandle - 1 < session->svcEnd ? rc.defHandle - 1 : session->svcEnd;
+}
+
+int onAmsPlayerRequested(uint16_t conn, const ble_gatt_error*, ble_gatt_attr*, void*) {
+  startAncsDiscovery(conn);
+  return 0;
+}
+
+// The phone answers each request with the current values, then pushes changes.
+int onAmsTrackRequested(uint16_t conn, const ble_gatt_error* error, ble_gatt_attr*, void*) {
+  static const uint8_t player[] = {AMS_ENTITY_PLAYER, AMS_PLAYER_NAME, AMS_PLAYER_PLAYBACK_INFO};
+  if (error->status == 0 && ble_gattc_write_flat(conn, session->amsEu.valHandle, player, sizeof(player),
+                                                 onAmsPlayerRequested, nullptr) == 0) {
+    return 0;
+  }
+  startAncsDiscovery(conn);
+  return 0;
+}
+
+int onAmsSubscribed(uint16_t conn, const ble_gatt_error* error, ble_gatt_attr*, void*) {
+  static const uint8_t track[] = {AMS_ENTITY_TRACK, AMS_TRACK_ARTIST, AMS_TRACK_ALBUM, AMS_TRACK_TITLE};
+  if (error->status == 0 &&
+      ble_gattc_write_flat(conn, session->amsEu.valHandle, track, sizeof(track), onAmsTrackRequested, nullptr) == 0) {
+    return 0;
+  }
+  LOG_INF("BLE", "Phone link: media subscription failed, status %d", error->status);
+  startAncsDiscovery(conn);
+  return 0;
+}
+
+int onAmsDsc(uint16_t conn, const ble_gatt_error* error, uint16_t, const ble_gatt_dsc* dsc, void*) {
+  if (error->status == 0 && dsc) {
+    if (dsc->uuid.u.type == BLE_UUID_TYPE_16 && dsc->uuid.u16.value == CCCD_UUID) session->amsEuCccd = dsc->handle;
+    return 0;
+  }
+  static const uint8_t enable[2] = {0x01, 0x00};
+  if (session->amsEuCccd &&
+      ble_gattc_write_flat(conn, session->amsEuCccd, enable, sizeof(enable), onAmsSubscribed, nullptr) == 0) {
+    return 0;
+  }
+  startAncsDiscovery(conn);
+  return 0;
+}
+
+int onAmsChr(uint16_t conn, const ble_gatt_error* error, const ble_gatt_chr* chr, void*) {
+  if (error->status == 0 && chr) {
+    const Chr c{chr->def_handle, chr->val_handle};
+    if (ble_uuid_cmp(&chr->uuid.u, &AMS_REMOTE_COMMAND.u) == 0) session->amsRc = c;
+    if (ble_uuid_cmp(&chr->uuid.u, &AMS_ENTITY_UPDATE.u) == 0) session->amsEu = c;
+    return 0;
+  }
+  if (session->amsEu.valHandle &&
+      ble_gattc_disc_all_dscs(conn, session->amsEu.valHandle, amsEuEnd(), onAmsDsc, nullptr) == 0) {
+    return 0;
+  }
+  startAncsDiscovery(conn);
+  return 0;
+}
+
+int onAmsService(uint16_t conn, const ble_gatt_error* error, const ble_gatt_svc* svc, void*) {
+  if (error->status == 0 && svc) {
+    session->svcStart = svc->start_handle;
+    session->svcEnd = svc->end_handle;
+    return 0;
+  }
+  if (session->svcStart && ble_gattc_disc_all_chrs(conn, session->svcStart, session->svcEnd, onAmsChr, nullptr) == 0) {
+    return 0;
+  }
+  LOG_INF("BLE", "Phone link: no Apple Media Service");
+  startAncsDiscovery(conn);
+  return 0;
+}
+
+void startAmsDiscovery(const uint16_t conn) {
+  session->svcStart = session->svcEnd = 0;
+  if (ble_gattc_disc_svc_by_uuid(conn, &AMS_SERVICE.u, onAmsService, nullptr) != 0) startAncsDiscovery(conn);
 }
 
 // ---- ANCS ----
@@ -841,6 +967,10 @@ int onGapEvent(ble_gap_event* event, void*) {
         os_mbuf_copydata(om, 0, len, session->dsBuf + session->dsLen);
         session->dsLen += len;
         parseDataSource(event->notify_rx.conn_handle);
+      } else if (session->amsEu.valHandle && event->notify_rx.attr_handle == session->amsEu.valHandle) {
+        uint8_t update[128];
+        const uint16_t n = len < sizeof(update) ? len : sizeof(update);
+        if (os_mbuf_copydata(om, 0, n, update) == 0) onEntityUpdate(update, n);
       }
       return 0;
     }
@@ -1130,6 +1260,24 @@ int liveSnapshot(Notification* out, const int max, int8_t& battery) {
   SessionLock lock;
   battery = session->phoneBattery;
   return collectNewest(out, max);
+}
+
+void liveMedia(Media& out) {
+  out = Media{};
+  if (!session) return;
+  SessionLock lock;
+  out = session->media;
+}
+
+int onMediaCommandWritten(uint16_t, const ble_gatt_error* error, ble_gatt_attr*, void*) {
+  if (error->status != 0) LOG_ERR("BLE", "Phone link: media command refused, status %d", error->status);
+  return 0;
+}
+
+bool mediaCommand(const MediaCommand command) {
+  if (!session || session->conn == BLE_HS_CONN_HANDLE_NONE || !session->amsRc.valHandle) return false;
+  const uint8_t id = static_cast<uint8_t>(command);
+  return ble_gattc_write_flat(session->conn, session->amsRc.valHandle, &id, 1, onMediaCommandWritten, nullptr) == 0;
 }
 
 bool dismiss(const uint32_t uid) {

@@ -555,6 +555,7 @@ After that, each minute of Clock sleep the X3 reconnects to the iPhone for a few
 - The clock takes the iPhone's time and time zone, so it stays correct across travel and daylight-saving changes.
 - The four newest notifications on the iPhone are listed under the clock: the app and how long ago it arrived, the title and the first two lines. The list refreshes within seconds of each minute.
 - Under the time: the date, the X3's battery level and the iPhone's (when the phone shares it). If the last good sync is more than five minutes old, a line shows when it was ("Last iPhone sync 14:05"), or "iPhone not found" if the phone has not answered since the device went to sleep.
+- While something plays on the iPhone, its title, artist and player app are shown under the status line.
 
 Under **Settings -> System -> Clock**:
 
@@ -562,6 +563,7 @@ Under **Settings -> System -> Clock**:
 - **Notification Detail** chooses what the clock screen shows: **Full text** (app, age, title and message) or **Sender & app**, which shows the number of notifications and, for each, only the sender (its title), the app and its age. The message text is never fetched from the iPhone in this mode.
 - **iPhone Quiet Hours** pauses the phone sync overnight (22:00-07:00, 23:00-07:00 or 00:00-06:00) to save battery. The clock keeps running; notifications resume at the end of the window.
 - **iPhone Notifications** connects to the iPhone and lists its notifications while the screen is open. Select one with the Up/Down buttons and press **Dismiss** (Confirm) to clear it on the iPhone as well.
+- **Now Playing** connects to the iPhone and shows what is playing. **Confirm** plays or pauses, **Left**/**Right** skip to the previous/next track and **Up**/**Down** change the volume.
 
 If the iPhone is out of range, the clock keeps running from its own chip; after three missed syncs it only looks for the phone every five minutes. Syncing every minute adds noticeably to the battery use of Clock sleep.
 

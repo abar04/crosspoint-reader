@@ -32,6 +32,21 @@ struct Sender {
   char title[TITLE_LEN];    // the sender, for messages and mail
 };
 
+// Now playing on the phone, from the Apple Media Service.
+struct Media {
+  bool known;        // the phone answered (it offers AMS)
+  uint8_t playback;  // AMS PlaybackState: 0 paused, 1 playing, 2 rewinding, 3 fast-forwarding
+  char player[APP_LEN];
+  char title[48];
+  char artist[32];
+  char album[32];
+};
+
+inline bool isPlaying(const Media& m) { return m.known && m.playback >= 1 && m.playback <= 3 && m.title[0] != '\0'; }
+
+// AMS remote commands.
+enum class MediaCommand : uint8_t { Play, Pause, TogglePlayPause, NextTrack, PreviousTrack, VolumeUp, VolumeDown };
+
 struct SyncResult {
   bool gotTime = false;
   time_t utc = 0;
@@ -46,6 +61,7 @@ struct SyncResult {
   uint16_t total = 0;       // notifications on the phone that pass the filter
   uint8_t senderCount = 0;  // newest first
   Sender senders[MAX_SENDERS];
+  Media media{};
 };
 
 // How much of each notification Clock sleep fetches and shows: the full text,
@@ -104,6 +120,10 @@ LiveState liveState();
 int liveSnapshot(Notification* out, int max, int8_t& battery);
 // Clears the notification on the iPhone (the ANCS negative action).
 bool dismiss(uint32_t uid);
+// Now playing, kept current while the live session is open.
+void liveMedia(Media& out);
+// Sends a playback command to the phone's media player.
+bool mediaCommand(MediaCommand command);
 void stopLive();
 
 enum class PairState : uint8_t { Idle, Advertising, Connected, Paired, Failed };

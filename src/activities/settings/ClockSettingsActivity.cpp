@@ -11,6 +11,7 @@
 #include "ClockSyncActivity.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "PhoneMediaActivity.h"
 #include "PhoneNotificationsActivity.h"
 #include "PhonePairActivity.h"
 #include "TimezonePickerActivity.h"
@@ -31,12 +32,16 @@ enum MenuItem {
   ITEM_PHONE_DETAIL,
   ITEM_PHONE_QUIET_HOURS,
   ITEM_PHONE_NOTIFICATIONS,
+  ITEM_PHONE_NOW_PLAYING,
 };
 
 const StrId menuNames[ClockSettingsActivity::ITEM_COUNT] = {
-    StrId::STR_TIMEZONE,          StrId::STR_CLOCK_DST,           StrId::STR_CLOCK_FORMAT, StrId::STR_CLOCK_IN_HEADER,
-    StrId::STR_CLOCK_SYNC_NOW,    StrId::STR_PHONE_PAIR,          StrId::STR_PHONE_FILTER, StrId::STR_PHONE_DETAIL,
+    StrId::STR_TIMEZONE,          StrId::STR_CLOCK_DST,
+    StrId::STR_CLOCK_FORMAT,      StrId::STR_CLOCK_IN_HEADER,
+    StrId::STR_CLOCK_SYNC_NOW,    StrId::STR_PHONE_PAIR,
+    StrId::STR_PHONE_FILTER,      StrId::STR_PHONE_DETAIL,
     StrId::STR_PHONE_QUIET_HOURS, StrId::STR_PHONE_NOTIFICATIONS,
+    StrId::STR_PHONE_NOW_PLAYING,
 };
 
 const StrId filterNames[static_cast<int>(PhoneLink::Filter::Count)] = {
@@ -120,6 +125,14 @@ void ClockSettingsActivity::activateIndex(const int index) {
         LOG_ERR("CLKSET", "OOM: PhoneNotificationsActivity");
       }
       return;
+    case ITEM_PHONE_NOW_PLAYING:
+      if (!PhoneLink::isPaired()) return;
+      if (auto activity = makeUniqueNoThrow<PhoneMediaActivity>(renderer, mappedInput)) {
+        startActivityForResult(std::move(activity), nullptr);
+      } else {
+        LOG_ERR("CLKSET", "OOM: PhoneMediaActivity");
+      }
+      return;
     default:
       return;
   }
@@ -153,6 +166,7 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
   const char* quiet = PhoneLink::quietHoursLabel(PhoneLink::quietHours());
   rowItems_[ITEM_PHONE_QUIET_HOURS].value = quiet ? quiet : tr(STR_STATE_OFF);
   rowItems_[ITEM_PHONE_NOTIFICATIONS].value = PhoneLink::isPaired() ? "" : tr(STR_NOT_SET);
+  rowItems_[ITEM_PHONE_NOW_PLAYING].value = PhoneLink::isPaired() ? "" : tr(STR_NOT_SET);
 
   fui::ListProps props;
   props.items = rowItems_;
