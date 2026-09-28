@@ -11,6 +11,9 @@
 #include "ClockSyncActivity.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "PhoneMediaActivity.h"
+#include "PhoneNotificationsActivity.h"
+#include "PhonePairActivity.h"
 #include "TimezonePickerActivity.h"
 #include "components/UITheme.h"
 #include "util/Timezones.h"
@@ -22,14 +25,29 @@ enum MenuItem {
   ITEM_TIMEZONE = 0,
   ITEM_DST,
   ITEM_FORMAT,
+  ITEM_STYLE,
   ITEM_SHOW_ON_HOME,
   ITEM_SYNC,
+  ITEM_PHONE,
+  ITEM_PHONE_FILTER,
+  ITEM_PHONE_DETAIL,
+  ITEM_PHONE_QUIET_HOURS,
+  ITEM_PHONE_NOTIFICATIONS,
+  ITEM_PHONE_NOW_PLAYING,
 };
 
 const StrId menuNames[ClockSettingsActivity::ITEM_COUNT] = {
-    StrId::STR_TIMEZONE,        StrId::STR_CLOCK_DST,      StrId::STR_CLOCK_FORMAT,
-    StrId::STR_CLOCK_IN_HEADER, StrId::STR_CLOCK_SYNC_NOW,
+    StrId::STR_TIMEZONE,          StrId::STR_CLOCK_DST,           StrId::STR_CLOCK_FORMAT,
+    StrId::STR_CLOCK_STYLE,       StrId::STR_CLOCK_IN_HEADER,     StrId::STR_CLOCK_SYNC_NOW,
+    StrId::STR_PHONE_PAIR,        StrId::STR_PHONE_FILTER,        StrId::STR_PHONE_DETAIL,
+    StrId::STR_PHONE_QUIET_HOURS, StrId::STR_PHONE_NOTIFICATIONS, StrId::STR_PHONE_NOW_PLAYING,
 };
+
+const StrId filterNames[static_cast<int>(PhoneLink::Filter::Count)] = {
+    StrId::STR_PHONE_FILTER_ALL, StrId::STR_PHONE_FILTER_MESSAGES, StrId::STR_PHONE_FILTER_MESSAGES_CALENDAR};
+
+const StrId styleNames[CrossPointSettings::CLOCK_STYLE_COUNT] = {
+    StrId::STR_CLOCK_STYLE_MODERN, StrId::STR_CLOCK_STYLE_LIGHT, StrId::STR_CLOCK_STYLE_DIGITAL};
 
 const StrId dstNames[CrossPointSettings::CLOCK_DST_MODE_COUNT] = {StrId::STR_CLOCK_DST_AUTO, StrId::STR_STATE_ON,
                                                                   StrId::STR_STATE_OFF};
@@ -47,6 +65,10 @@ void ClockSettingsActivity::onEnter() {
 }
 
 const char* ClockSettingsActivity::headerTitle() const { return tr(STR_CLOCK); }
+
+int ClockSettingsActivity::listCount() const {
+  return PhoneLink::isAvailable() ? ITEM_COUNT : ITEM_COUNT - PHONE_ITEM_COUNT;
+}
 
 void ClockSettingsActivity::activateIndex(const int index) {
   nav.selected = index;
@@ -66,6 +88,9 @@ void ClockSettingsActivity::activateIndex(const int index) {
     case ITEM_FORMAT:
       SETTINGS.clockFormat = (SETTINGS.clockFormat + 1) % 2;
       break;
+    case ITEM_STYLE:
+      SETTINGS.clockStyle = (SETTINGS.clockStyle + 1) % CrossPointSettings::CLOCK_STYLE_COUNT;
+      break;
     case ITEM_SHOW_ON_HOME:
       SETTINGS.clockShowInHeader = (SETTINGS.clockShowInHeader + 1) % 2;
       break;
@@ -74,6 +99,43 @@ void ClockSettingsActivity::activateIndex(const int index) {
         startActivityForResult(std::move(activity), nullptr);
       } else {
         LOG_ERR("CLKSET", "OOM: ClockSyncActivity");
+      }
+      return;
+    case ITEM_PHONE:
+      if (auto activity = makeUniqueNoThrow<PhonePairActivity>(renderer, mappedInput)) {
+        startActivityForResult(std::move(activity), nullptr);
+      } else {
+        LOG_ERR("CLKSET", "OOM: PhonePairActivity");
+      }
+      return;
+    case ITEM_PHONE_FILTER:
+      PhoneLink::setFilter(static_cast<PhoneLink::Filter>((static_cast<int>(PhoneLink::filter()) + 1) %
+                                                          static_cast<int>(PhoneLink::Filter::Count)));
+      requestUpdate();
+      return;
+    case ITEM_PHONE_DETAIL:
+      PhoneLink::setDetail(PhoneLink::detail() == PhoneLink::Detail::Full ? PhoneLink::Detail::SenderAndApp
+                                                                          : PhoneLink::Detail::Full);
+      requestUpdate();
+      return;
+    case ITEM_PHONE_QUIET_HOURS:
+      PhoneLink::setQuietHours((PhoneLink::quietHours() + 1) % PhoneLink::QUIET_HOURS_COUNT);
+      requestUpdate();
+      return;
+    case ITEM_PHONE_NOTIFICATIONS:
+      if (!PhoneLink::isPaired()) return;
+      if (auto activity = makeUniqueNoThrow<PhoneNotificationsActivity>(renderer, mappedInput)) {
+        startActivityForResult(std::move(activity), nullptr);
+      } else {
+        LOG_ERR("CLKSET", "OOM: PhoneNotificationsActivity");
+      }
+      return;
+    case ITEM_PHONE_NOW_PLAYING:
+      if (!PhoneLink::isPaired()) return;
+      if (auto activity = makeUniqueNoThrow<PhoneMediaActivity>(renderer, mappedInput)) {
+        startActivityForResult(std::move(activity), nullptr);
+      } else {
+        LOG_ERR("CLKSET", "OOM: PhoneMediaActivity");
       }
       return;
     default:
@@ -95,6 +157,8 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
   const uint8_t dst = SETTINGS.clockDst < CrossPointSettings::CLOCK_DST_MODE_COUNT ? SETTINGS.clockDst : uint8_t{0};
   rowItems_[ITEM_DST].value = I18N.get(dstNames[dst]);
   rowItems_[ITEM_FORMAT].value = SETTINGS.clockFormat == 1 ? tr(STR_CLOCK_FORMAT_12H) : tr(STR_CLOCK_FORMAT_24H);
+  const uint8_t style = SETTINGS.clockStyle < CrossPointSettings::CLOCK_STYLE_COUNT ? SETTINGS.clockStyle : uint8_t{0};
+  rowItems_[ITEM_STYLE].value = I18N.get(styleNames[style]);
   rowItems_[ITEM_SHOW_ON_HOME].value = SETTINGS.clockShowInHeader ? tr(STR_SHOW) : tr(STR_HIDE);
   // The sync row's value is the current time itself: it confirms the sync,
   // previews format/zone changes, and reads "Not Set" until the first sync.
@@ -102,10 +166,18 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
       SETTINGS.clockHasBeenSynced && halClock.formatTime(syncTime_, sizeof(syncTime_), SETTINGS.clockFormat == 1)
           ? syncTime_
           : tr(STR_NOT_SET);
+  rowItems_[ITEM_PHONE].value = PhoneLink::isPaired() ? tr(STR_PHONE_PAIRED) : tr(STR_NOT_SET);
+  rowItems_[ITEM_PHONE_FILTER].value = I18N.get(filterNames[static_cast<int>(PhoneLink::filter())]);
+  rowItems_[ITEM_PHONE_DETAIL].value =
+      PhoneLink::detail() == PhoneLink::Detail::Full ? tr(STR_PHONE_DETAIL_FULL) : tr(STR_PHONE_DETAIL_SUMMARY);
+  const char* quiet = PhoneLink::quietHoursLabel(PhoneLink::quietHours());
+  rowItems_[ITEM_PHONE_QUIET_HOURS].value = quiet ? quiet : tr(STR_STATE_OFF);
+  rowItems_[ITEM_PHONE_NOTIFICATIONS].value = PhoneLink::isPaired() ? "" : tr(STR_NOT_SET);
+  rowItems_[ITEM_PHONE_NOW_PLAYING].value = PhoneLink::isPaired() ? "" : tr(STR_NOT_SET);
 
   fui::ListProps props;
   props.items = rowItems_;
-  props.count = ITEM_COUNT;
+  props.count = listCount();
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
   props.valueInset = 8;

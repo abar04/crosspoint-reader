@@ -15,6 +15,7 @@
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SPI.h>
 #include <VectorFontSupport.h>
 #include <WiFi.h>
@@ -32,10 +33,12 @@
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/ClockSleepScreen.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "network/PhoneLink.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
@@ -277,6 +280,8 @@ void enterDeepSleep(bool fromTimeout = false) {
   // Commit to sleeping before goToSleep() runs the outgoing activity's onExit():
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
+  // The sleep screen replaces any earlier clock face; render() re-arms it.
+  ClockSleepScreen::deactivate();
   activityManager.goToSleep(fromTimeout);
 
   if (isQuickResumeSleep) {
@@ -296,9 +301,68 @@ void enterDeepSleep(bool fromTimeout = false) {
   halTiltSensor.deepSleep();
   display.deepSleep();
   Storage.prepareForDeepSleep();
+  const bool clockTimerArmed = ClockSleepScreen::armWakeTimer();
   LOG_DBG("MAIN", "Entering deep sleep");
 
-  powerManager.startDeepSleep(gpio);
+  powerManager.startDeepSleep(gpio, clockTimerArmed);
+}
+
+// Covers the iPhone reconnecting to our advertising plus reading its time and
+// notifications.
+constexpr uint32_t PHONE_SYNC_TIMEOUT_MS = 10000;
+// Clearing sends one command per notification, so it gets longer.
+constexpr uint32_t PHONE_CLEAR_TIMEOUT_MS = 20000;
+// Power-button double click during Clock sleep: the waking press must be
+// released within CLICK_MAX_MS, the second press follow within WINDOW_MS.
+constexpr unsigned long CLOCK_CLICK_MAX_MS = 300;
+constexpr unsigned long CLOCK_DOUBLE_CLICK_WINDOW_MS = 500;
+
+// Timer wake armed by the Clock sleep screen, or a power double click during
+// it: repaint the minute and go straight back to sleep without mounting SD, loading settings or starting the
+// UI. Returns only when the wake can't be serviced; setup() then boots normally.
+// With `clearNotifications` (a power-button double click) the phone sync runs
+// at once and clears the iPhone's notifications first.
+static void serviceClockSleepWake(const bool clearNotifications) {
+  if (!ClockSleepScreen::isActive()) return;
+
+  halClock.begin();
+  ClockSleepScreen::restoreLocale();
+  struct tm now;
+  if (!halClock.localTime(now, /*fresh=*/true)) {
+    LOG_ERR("MAIN", "Clock sleep wake: RTC read failed, booting normally");
+    return;
+  }
+
+  // Syncs happen with each new minute, plus once right after going to sleep.
+  // An early timer wake with neither leaves the display asleep and re-arms.
+  const bool repaint = ClockSleepScreen::needsRepaint(now);
+  const bool syncDue =
+      clearNotifications || ((ClockSleepScreen::takeInitialSync() || repaint) && ClockSleepScreen::phoneSyncDue(now));
+  if (repaint || syncDue) {
+    display.begin(/*seamless=*/true);
+    renderer.begin();
+    renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
+    renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
+    if (repaint) {
+      ClockSleepScreen::update(renderer, now);
+    } else {
+      ClockSleepScreen::restoreBaseline(renderer);
+    }
+    // The time is painted first so the minute lands on schedule; the phone
+    // sync then corrects the RTC and refreshes the notification list.
+    if (syncDue) {
+      if (auto phone = makeUniqueNoThrow<PhoneLink::SyncResult>()) {
+        const bool ok = clearNotifications ? PhoneLink::clearAll(*phone, PHONE_CLEAR_TIMEOUT_MS)
+                                           : PhoneLink::sync(*phone, PHONE_SYNC_TIMEOUT_MS);
+        ClockSleepScreen::applyPhoneSync(renderer, ok, *phone);
+      } else {
+        LOG_ERR("MAIN", "OOM: phone sync result");
+      }
+    }
+    display.deepSleep();
+  }
+
+  powerManager.startDeepSleep(gpio, ClockSleepScreen::armWakeTimer());
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -381,11 +445,22 @@ void setup() {
   powerManager.begin();
 
   const auto wakeupReason = gpio.getWakeupReason();
+  if (wakeupReason == HalGPIO::WakeupReason::Timer) {
+    serviceClockSleepWake(/*clearNotifications=*/false);
+  }
+
   // Sample the wake hold now — a click wake is released within milliseconds of
   // boot — but defer the sleep-or-boot decision until SETTINGS is loaded below:
   // click-to-wake is a setting, and an X4 battery power-off cuts all power, so
   // only SD state survives to the next boot.
   const bool wakeHoldVerified = wakeupReason != HalGPIO::WakeupReason::PowerButton || gpio.verifyPowerButtonWakeup();
+
+  // Double-clicking power during Clock sleep clears the iPhone's notifications
+  // and goes back to sleep; any other press carries on below.
+  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && ClockSleepScreen::hasPhone() &&
+      gpio.powerWakeWasDoubleClick(CLOCK_CLICK_MAX_MS, CLOCK_DOUBLE_CLICK_WINDOW_MS)) {
+    serviceClockSleepWake(/*clearNotifications=*/true);
+  }
 
   // X4 Pro and X4 Classic both map BTN_UP to GPIO0 — an ESP32-S3 boot strap — so
   // gate recovery on the non-strap Down key (GPIO7) to avoid a stuck-in-recovery loop.
@@ -456,7 +531,8 @@ void setup() {
       if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
         Storage.prepareForDeepSleep();
-        powerManager.startDeepSleep(gpio);
+        // The panel still shows the clock face; keep it ticking.
+        powerManager.startDeepSleep(gpio, ClockSleepScreen::armWakeTimer());
       }
       wakePowerReleasePending = true;
       break;
@@ -478,6 +554,8 @@ void setup() {
 #endif
     case HalGPIO::WakeupReason::AfterFlash:
       // After flashing, just proceed to boot
+    case HalGPIO::WakeupReason::Timer:
+      // A clock-screen timer wake that couldn't be serviced boots normally.
     case HalGPIO::WakeupReason::Other:
     default:
       break;

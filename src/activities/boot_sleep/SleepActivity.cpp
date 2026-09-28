@@ -22,6 +22,7 @@
 #include <limits>
 #include <string>
 
+#include "ClockSleepScreen.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "activities/reader/ReaderUtils.h"
@@ -558,6 +559,9 @@ void SleepActivity::onEnter() {
       } else {
         return renderCustomSleepScreen();
       }
+    case (CrossPointSettings::SLEEP_SCREEN_MODE::CLOCK):
+      if (ClockSleepScreen::render(renderer)) return;
+      return renderDefaultSleepScreen();
     default:
       return renderDefaultSleepScreen();
   }

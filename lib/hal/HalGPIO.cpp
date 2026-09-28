@@ -242,6 +242,37 @@ bool HalGPIO::verifyPowerButtonWakeup() {
   return heldAtFirstSample && inputMgr.isPowerButtonPhysicallyPressed();
 }
 
+bool HalGPIO::powerWakeWasDoubleClick(const unsigned long maxClickMs, const unsigned long windowMs) {
+  if (BoardConfig::ACTIVE.input.power < 0) return false;
+  // Contact bounce on release must not read as the second press.
+  constexpr unsigned long STABLE_MS = 20;
+  const unsigned long start = millis();
+  unsigned long releasedAt = 0;
+  unsigned long edgeAt = start;
+  bool last = inputMgr.isPowerButtonPhysicallyPressed();
+  while (true) {
+    delay(2);
+    const unsigned long now = millis();
+    const bool pressed = inputMgr.isPowerButtonPhysicallyPressed();
+    if (pressed != last) {
+      last = pressed;
+      edgeAt = now;
+    }
+    const bool stable = now - edgeAt >= STABLE_MS;
+    if (releasedAt == 0) {
+      if (stable && !pressed) {
+        releasedAt = now;
+      } else if (now - start > maxClickMs) {
+        return false;
+      }
+    } else if (stable && pressed) {
+      return true;
+    } else if (now - releasedAt > windowMs) {
+      return false;
+    }
+  }
+}
+
 bool HalGPIO::isUsbConnected() const {
   if (deviceIsX3()) {
     // X3: infer USB/charging via BQ27220 Current() register (0x0C, signed mA).
@@ -282,6 +313,11 @@ bool HalGPIO::coldBootImpliesPowerButton() const {
 HalGPIO::WakeupReason HalGPIO::getWakeupReason() const {
   const auto wakeupCause = esp_sleep_get_wakeup_cause();
   const auto resetReason = esp_reset_reason();
+
+  // Checked before isUsbConnected(), which costs an I2C gauge read on the X3.
+  if (resetReason == ESP_RST_DEEPSLEEP && wakeupCause == ESP_SLEEP_WAKEUP_TIMER) {
+    return WakeupReason::Timer;
+  }
 
   const bool usbConnected = isUsbConnected();
 

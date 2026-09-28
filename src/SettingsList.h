@@ -16,6 +16,7 @@
 #include "HomeButtonSettings.h"
 #include "KOReaderCredentialStore.h"
 #include "ReaderFontSizes.h"
+#include "activities/boot_sleep/ClockSleepScreen.h"
 #include "activities/settings/SettingsActivity.h"
 #include "components/UITheme.h"
 #include "util/DictionaryRegistry.h"
@@ -218,6 +219,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     sleepScreenValues[CrossPointSettings::BLANK] = StrId::STR_NONE_OPT;
     sleepScreenValues[CrossPointSettings::QUICK_RESUME] = StrId::STR_QUICK_RESUME;
     sleepScreenValues[CrossPointSettings::TRANSPARENT_CUSTOM] = StrId::STR_TRANSPARENT;
+    sleepScreenValues[CrossPointSettings::CLOCK] = StrId::STR_CLOCK;
+    // CLOCK is the last value, so dropping its label clamps a stored CLOCK to
+    // the default on boards that can't wake on a timer.
+    if (!ClockSleepScreen::isSupported()) sleepScreenValues.pop_back();
 
     std::vector<StrId> statusBarClockValues(CrossPointSettings::STATUS_BAR_CLOCK_MODE_COUNT);
     statusBarClockValues[CrossPointSettings::STATUS_BAR_CLOCK_HIDE] = StrId::STR_HIDE;
@@ -481,6 +486,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_CLOCK_DST, &CrossPointSettings::clockDst,
                           {StrId::STR_CLOCK_DST_AUTO, StrId::STR_STATE_ON, StrId::STR_STATE_OFF}, "clockDst",
                           StrId::STR_CUSTOMISE_STATUS_BAR),
+        SettingInfo::Enum(StrId::STR_CLOCK_STYLE, &CrossPointSettings::clockStyle,
+                          {StrId::STR_CLOCK_STYLE_MODERN, StrId::STR_CLOCK_STYLE_LIGHT, StrId::STR_CLOCK_STYLE_DIGITAL},
+                          "clockStyle", StrId::STR_CUSTOMISE_STATUS_BAR),
         SettingInfo::Toggle(StrId::STR_CLOCK_IN_HEADER, &CrossPointSettings::clockShowInHeader, "clockShowHeader",
                             StrId::STR_CUSTOMISE_STATUS_BAR),
         // Persistence flag for NTP debounce. Resetting from the web UI forces a re-sync

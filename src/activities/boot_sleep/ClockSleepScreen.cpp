@@ -1,0 +1,774 @@
+#include "ClockSleepScreen.h"
+
+#include <GfxRenderer.h>
+#include <HalClock.h>
+#include <HalDisplay.h>
+#include <HalGPIO.h>
+#include <HalPowerManager.h>
+#include <I18n.h>
+#include <Logging.h>
+#include <esp_attr.h>
+#include <esp_sleep.h>
+
+#include <algorithm>
+#include <climits>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include "ClockDigitFaces.h"
+#include "CrossPointSettings.h"
+#include "fontIds.h"
+
+namespace ClockSleepScreen {
+namespace {
+
+constexpr uint32_t FACE_MAGIC = 0xC10CFACE;
+constexpr uint64_t US_PER_SECOND = 1000000;
+// The RTC reports whole seconds, so a wake computed from it lands 0-1 s past
+// the minute boundary. The margin keeps sleep-timer drift (it runs from the
+// RC slow clock) from waking just before the boundary.
+constexpr uint64_t WAKE_MARGIN_US = 500000;
+// After this many missed phone syncs in a row, only try every 5th minute.
+constexpr uint8_t PHONE_BACKOFF_AFTER = 3;
+constexpr int PHONE_BACKOFF_MINUTES = 5;
+// Seconds of RTC drift from the phone's time before the RTC is rewritten.
+constexpr int PHONE_TIME_TOLERANCE_S = 2;
+constexpr int MESSAGE_LINES = 2;
+// Show when the phone was last reached once the last good sync is this old.
+constexpr uint32_t STALE_SYNC_MINUTES = 5;
+
+constexpr StrId WEEKDAY_NAMES[7] = {StrId::STR_DAY_SUNDAY,    StrId::STR_DAY_MONDAY,   StrId::STR_DAY_TUESDAY,
+                                    StrId::STR_DAY_WEDNESDAY, StrId::STR_DAY_THURSDAY, StrId::STR_DAY_FRIDAY,
+                                    StrId::STR_DAY_SATURDAY};
+constexpr StrId MONTH_NAMES[12] = {StrId::STR_MONTH_JANUARY, StrId::STR_MONTH_FEBRUARY, StrId::STR_MONTH_MARCH,
+                                   StrId::STR_MONTH_APRIL,   StrId::STR_MONTH_MAY,      StrId::STR_MONTH_JUNE,
+                                   StrId::STR_MONTH_JULY,    StrId::STR_MONTH_AUGUST,   StrId::STR_MONTH_SEPTEMBER,
+                                   StrId::STR_MONTH_OCTOBER, StrId::STR_MONTH_NOVEMBER, StrId::STR_MONTH_DECEMBER};
+
+// The face on the glass. RTC_DATA_ATTR memory survives deep sleep and is
+// re-initialized (magic cleared) by any other reset.
+struct Face {
+  uint32_t magic;
+  uint8_t hour;  // 0-23
+  uint8_t minute;
+  bool use12h;
+  char posixTz[64];
+  bool phoneSync;         // a paired iPhone is synced after each repaint
+  uint8_t phoneFailures;  // consecutive syncs the phone missed
+  uint8_t notificationCount;
+  PhoneLink::Notification notifications[PhoneLink::MAX_NOTIFICATIONS];
+  int8_t phoneBattery;       // percent, -1 = unknown
+  uint32_t shownMinutes;     // face time as local minutes since 1970, for ages
+  uint8_t language;          // UI language, restored on timer wakes
+  uint8_t deviceBattery;     // this device's battery percent
+  uint8_t quietHours;        // PhoneLink quiet-hours index captured at sleep
+  uint32_t lastSyncMinutes;  // local minutes of the last good phone sync; 0 = none yet
+  // Sender & app mode: shown instead of the notification text.
+  bool summary;
+  uint16_t total;
+  uint8_t senderCount;
+  PhoneLink::Sender senders[PhoneLink::MAX_SENDERS];
+  PhoneLink::Media media;   // now playing, shown while something plays
+  bool initialSyncPending;  // first timer wake comes at once, to sync the phone
+  uint8_t style;            // CrossPointSettings::CLOCK_STYLE
+};
+
+// Whether the face lists anything under the clock (which then moves up).
+bool hasList(const Face& f) { return f.summary ? f.total > 0 : f.notificationCount > 0; }
+RTC_DATA_ATTR Face face;
+
+// Seven-segment bits: a top, b upper right, c lower right, d bottom,
+// e lower left, f upper left, g middle.
+constexpr uint8_t SEG_A = 1 << 0;
+constexpr uint8_t SEG_B = 1 << 1;
+constexpr uint8_t SEG_C = 1 << 2;
+constexpr uint8_t SEG_D = 1 << 3;
+constexpr uint8_t SEG_E = 1 << 4;
+constexpr uint8_t SEG_F = 1 << 5;
+constexpr uint8_t SEG_G = 1 << 6;
+constexpr uint8_t DIGIT_SEGMENTS[10] = {
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,          // 0
+    SEG_B | SEG_C,                                          // 1
+    SEG_A | SEG_B | SEG_D | SEG_E | SEG_G,                  // 2
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_G,                  // 3
+    SEG_B | SEG_C | SEG_F | SEG_G,                          // 4
+    SEG_A | SEG_C | SEG_D | SEG_F | SEG_G,                  // 5
+    SEG_A | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,          // 6
+    SEG_A | SEG_B | SEG_C,                                  // 7
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,  // 8
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G,          // 9
+};
+
+struct Metrics {
+  int digitW;
+  int digitH;
+  int half;     // segment half-thickness
+  int gap;      // clearance between neighbouring segment tips
+  int pairGap;  // between the two digits of a pair
+  int colonW;   // colon slot, including its side spacing
+};
+
+// Sized for HH:MM, which is 5 digit widths wide.
+Metrics metricsFor(const GfxRenderer& renderer) {
+  const int screenW = renderer.getScreenWidth();
+  const int margin = screenW / 16;
+  Metrics m{};
+  m.digitW = (screenW - 2 * margin) / 5;
+  m.digitH = m.digitW * 2;
+  m.half = m.digitW / 8;
+  m.gap = std::max(1, m.digitW / 40);
+  m.pairGap = m.digitW / 5;
+  m.colonW = m.digitW * 3 / 5;
+  return m;
+}
+
+// Bar with 45-degree pointed tips at x0 and x1, centred on row y.
+void drawHorizontalSegment(const GfxRenderer& renderer, const int x0, const int x1, const int y, const int half) {
+  for (int dy = -half; dy <= half; dy++) {
+    const int inset = std::abs(dy);
+    renderer.fillRect(x0 + inset, y + dy, x1 - x0 + 1 - 2 * inset, 1);
+  }
+}
+
+// Bar with 45-degree pointed tips at y0 and y1, centred on column x.
+void drawVerticalSegment(const GfxRenderer& renderer, const int x, const int y0, const int y1, const int half) {
+  for (int dx = -half; dx <= half; dx++) {
+    const int inset = std::abs(dx);
+    renderer.fillRect(x + dx, y0 + inset, 1, y1 - y0 + 1 - 2 * inset);
+  }
+}
+
+void drawSegments(const GfxRenderer& renderer, const Metrics& m, const int x, const int y, const uint8_t segments) {
+  const int left = x + m.half;
+  const int right = x + m.digitW - 1 - m.half;
+  const int top = y + m.half;
+  const int middle = y + m.digitH / 2;
+  const int bottom = y + m.digitH - 1 - m.half;
+
+  if (segments & SEG_A) drawHorizontalSegment(renderer, left + m.gap, right - m.gap, top, m.half);
+  if (segments & SEG_G) drawHorizontalSegment(renderer, left + m.gap, right - m.gap, middle, m.half);
+  if (segments & SEG_D) drawHorizontalSegment(renderer, left + m.gap, right - m.gap, bottom, m.half);
+  if (segments & SEG_F) drawVerticalSegment(renderer, left, top + m.gap, middle - m.gap, m.half);
+  if (segments & SEG_B) drawVerticalSegment(renderer, right, top + m.gap, middle - m.gap, m.half);
+  if (segments & SEG_E) drawVerticalSegment(renderer, left, middle + m.gap, bottom - m.gap, m.half);
+  if (segments & SEG_C) drawVerticalSegment(renderer, right, middle + m.gap, bottom - m.gap, m.half);
+}
+
+void drawDigit(const GfxRenderer& renderer, const Metrics& m, const int x, const int y, const int digit) {
+  drawSegments(renderer, m, x, y, DIGIT_SEGMENTS[digit]);
+}
+
+void drawColon(const GfxRenderer& renderer, const Metrics& m, const int x, const int y) {
+  const int dot = 2 * m.half + 1;
+  const int dotX = x + (m.colonW - dot) / 2;
+  const int middle = y + m.digitH / 2;
+  renderer.fillRect(dotX, middle - m.digitH / 5 - m.half, dot, dot);
+  renderer.fillRect(dotX, middle + m.digitH / 5 - m.half, dot, dot);
+}
+
+// Copies the longest prefix of `text` that fits `maxWidth` into `out` and
+// returns where the rest starts. Wrapping breaks at a space when it can; with
+// `ellipsize` an overflowing line ends in "..." and the rest is dropped.
+const char* fitLine(const GfxRenderer& renderer, const int fontId, const EpdFontFamily::Style style, const char* text,
+                    const int maxWidth, const bool ellipsize, char* out, const size_t outSize) {
+  while (*text == ' ') text++;
+  size_t n = strnlen(text, outSize - 4);
+  memcpy(out, text, n);
+  out[n] = '\0';
+  if (text[n] == '\0' && renderer.getTextWidth(fontId, out, style) <= maxWidth) return text + n;
+
+  const auto prevBoundary = [text](size_t k) {
+    while (k > 0 && (static_cast<uint8_t>(text[k]) & 0xC0) == 0x80) k--;
+    return k;
+  };
+  size_t k = prevBoundary(n);
+  while (k > 0) {
+    memcpy(out, text, k);
+    if (ellipsize) {
+      memcpy(out + k, "...", 4);
+    } else {
+      out[k] = '\0';
+    }
+    if (renderer.getTextWidth(fontId, out, style) <= maxWidth) break;
+    k = prevBoundary(k - 1);
+  }
+  if (ellipsize) return text + strlen(text);
+
+  // Prefer a word break in the back half of the line.
+  for (size_t i = k; i > k / 2; i--) {
+    if (text[i] == ' ') {
+      k = i;
+      out[k] = '\0';
+      break;
+    }
+  }
+  return text + k;
+}
+
+// A layout pass: measures (paint = false) or draws. Content stops at `bottom`.
+struct Pen {
+  const GfxRenderer& renderer;
+  bool paint;
+  int bottom;
+};
+
+int drawNotifications(const Pen& pen, const Face& f, int y) {
+  const GfxRenderer& renderer = pen.renderer;
+  const int screenW = renderer.getScreenWidth();
+  const int margin = screenW / 16;
+  const int width = screenW - 2 * margin;
+  const int titleH = renderer.getLineHeight(UI_12_FONT_ID);
+  const int bodyH = renderer.getLineHeight(UI_10_FONT_ID);
+  char line[PhoneLink::MESSAGE_LEN + 4];
+
+  for (int i = 0; i < f.notificationCount && y + 8 + titleH <= pen.bottom; i++) {
+    const PhoneLink::Notification& n = f.notifications[i];
+    if (pen.paint) renderer.fillRect(margin, y, width, 1);
+    y += 8;
+    char age[16];
+    PhoneLink::formatAge(age, sizeof(age), n.arrivedMinutes, f.shownMinutes);
+    if (n.app[0] != '\0' || age[0] != '\0') {
+      if (pen.paint) {
+        char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
+        snprintf(meta, sizeof(meta), "%s%s%s", n.app, n.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
+        fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width, true, line, sizeof(line));
+        renderer.drawText(UI_10_FONT_ID, margin, y, line);
+      }
+      y += bodyH;
+    }
+    if (n.title[0] != '\0') {
+      if (pen.paint) {
+        fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, n.title, width, true, line, sizeof(line));
+        renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+      }
+      y += titleH;
+    }
+    const char* rest = n.message;
+    for (int l = 0; l < MESSAGE_LINES && *rest != '\0' && y + bodyH <= pen.bottom; l++) {
+      rest = fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, rest, width, l == MESSAGE_LINES - 1, line,
+                     sizeof(line));
+      if (pen.paint) renderer.drawText(UI_10_FONT_ID, margin, y, line);
+      y += bodyH;
+    }
+    y += 8;
+  }
+  return y;
+}
+
+// Date, battery and phone-sync lines under the time. Returns the y below them.
+int drawStatus(const Pen& pen, const Face& f, int y) {
+  const GfxRenderer& renderer = pen.renderer;
+  const int dateH = renderer.getLineHeight(UI_12_FONT_ID);
+  const int smallH = renderer.getLineHeight(UI_10_FONT_ID);
+
+  // Days-to-civil (Howard Hinnant) for the face's local date.
+  const long days = static_cast<long>(f.shownMinutes / 1440);
+  if (f.shownMinutes != 0) {
+    if (pen.paint) {
+      const long z = days + 719468L;
+      const long era = (z >= 0 ? z : z - 146096L) / 146097L;
+      const unsigned doe = static_cast<unsigned>(z - era * 146097L);
+      const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+      const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+      const unsigned mp = (5 * doy + 2) / 153;
+      const unsigned day = doy - (153 * mp + 2) / 5 + 1;
+      const unsigned month = mp < 10 ? mp + 3 : mp - 9;
+      const int weekday = static_cast<int>((days + 4) % 7);  // 1970-01-01 was a Thursday
+      char date[64];
+      snprintf(date, sizeof(date), "%s %u %s", I18N.get(WEEKDAY_NAMES[weekday]), day, I18N.get(MONTH_NAMES[month - 1]));
+      renderer.drawCenteredText(UI_12_FONT_ID, y, date, true, EpdFontFamily::BOLD);
+    }
+    y += dateH + 4;
+  }
+
+  char status[64] = "";
+  int len = 0;
+  if (f.deviceBattery <= 100) {
+    len += snprintf(status + len, sizeof(status) - len, tr(STR_DEVICE_BATTERY), static_cast<int>(f.deviceBattery));
+  }
+  if (f.phoneSync && f.phoneBattery >= 0 && len < static_cast<int>(sizeof(status))) {
+    if (len > 0) len += snprintf(status + len, sizeof(status) - len, " \xC2\xB7 ");
+    snprintf(status + len, sizeof(status) - len, tr(STR_PHONE_BATTERY), static_cast<int>(f.phoneBattery));
+  }
+  if (status[0] != '\0') {
+    if (pen.paint) renderer.drawCenteredText(UI_10_FONT_ID, y, status);
+    y += smallH;
+  }
+
+  if (f.phoneSync) {
+    const bool neverSynced = f.lastSyncMinutes == 0;
+    const bool stale = neverSynced ? f.phoneFailures >= 2 : f.shownMinutes - f.lastSyncMinutes >= STALE_SYNC_MINUTES;
+    if (stale) {
+      if (pen.paint) {
+        char line[64];
+        if (neverSynced) {
+          snprintf(line, sizeof(line), "%s", tr(STR_PHONE_NOT_FOUND));
+        } else {
+          const int hour = static_cast<int>(f.lastSyncMinutes / 60 % 24);
+          const int minute = static_cast<int>(f.lastSyncMinutes % 60);
+          char when[12];
+          if (f.use12h) {
+            snprintf(when, sizeof(when), "%d:%02d %s", hour % 12 == 0 ? 12 : hour % 12, minute,
+                     HalClock::meridiem(hour));
+          } else {
+            snprintf(when, sizeof(when), "%02d:%02d", hour, minute);
+          }
+          snprintf(line, sizeof(line), tr(STR_PHONE_LAST_SYNC), when);
+        }
+        renderer.drawCenteredText(UI_10_FONT_ID, y, line);
+      }
+      y += smallH;
+    }
+  }
+
+  if (f.phoneSync && PhoneLink::isPlaying(f.media)) {
+    y += 6;
+    char byline[sizeof(f.media.artist) + sizeof(f.media.player) + 8];
+    snprintf(byline, sizeof(byline), "%s%s%s", f.media.artist,
+             f.media.artist[0] != '\0' && f.media.player[0] != '\0' ? " \xC2\xB7 " : "", f.media.player);
+    if (pen.paint) {
+      const int width = renderer.getScreenWidth() - 2 * (renderer.getScreenWidth() / 16);
+      char line[sizeof(f.media.title) + 4];
+      fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, f.media.title, width, true, line, sizeof(line));
+      renderer.drawCenteredText(UI_12_FONT_ID, y, line, true, EpdFontFamily::BOLD);
+      if (byline[0] != '\0') {
+        char fitted[sizeof(byline) + 4];
+        fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, byline, width, true, fitted, sizeof(fitted));
+        renderer.drawCenteredText(UI_10_FONT_ID, y + dateH, fitted);
+      }
+    }
+    y += dateH;
+    if (byline[0] != '\0') y += smallH;
+  }
+  return y;
+}
+
+// Sender & app mode: "6 notifications", then one line per notification with
+// the sender on the left and "App · 5m" on the right; no message text.
+int drawSummary(const Pen& pen, const Face& f, int y) {
+  const GfxRenderer& renderer = pen.renderer;
+  const int screenW = renderer.getScreenWidth();
+  const int margin = screenW / 16;
+  const int width = screenW - 2 * margin;
+  const int titleH = renderer.getLineHeight(UI_12_FONT_ID);
+  const int rowH = titleH + 6;
+  char line[PhoneLink::TITLE_LEN + 8];
+
+  y += 8;
+  if (pen.paint) {
+    renderer.fillRect(margin, y - 8, width, 1);
+    if (f.total == 1) {
+      snprintf(line, sizeof(line), "%s", tr(STR_NOTIFICATION_COUNT_ONE));
+    } else {
+      snprintf(line, sizeof(line), tr(STR_NOTIFICATION_COUNT), static_cast<int>(f.total));
+    }
+    renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+  }
+  y += rowH;
+
+  int listed = 0;
+  for (int i = 0; i < f.senderCount && y + titleH <= pen.bottom; i++) {
+    if (pen.paint) {
+      const PhoneLink::Sender& s = f.senders[i];
+      char age[16];
+      PhoneLink::formatAge(age, sizeof(age), s.arrivedMinutes, f.shownMinutes);
+      char meta[PhoneLink::APP_LEN + sizeof(age) + 8];
+      snprintf(meta, sizeof(meta), "%s%s%s", s.app, s.app[0] != '\0' && age[0] != '\0' ? " \xC2\xB7 " : "", age);
+      // The app and age keep at most half the row; the sender gets the rest.
+      char right[sizeof(meta)];
+      fitLine(renderer, UI_10_FONT_ID, EpdFontFamily::REGULAR, meta, width / 2, true, right, sizeof(right));
+      const int rightW = right[0] != '\0' ? renderer.getTextWidth(UI_10_FONT_ID, right) : 0;
+      fitLine(renderer, UI_12_FONT_ID, EpdFontFamily::BOLD, s.title[0] != '\0' ? s.title : tr(STR_OTHER_APPS),
+              width - rightW - 16, true, line, sizeof(line));
+      renderer.drawText(UI_12_FONT_ID, margin, y, line, true, EpdFontFamily::BOLD);
+      if (rightW > 0) {
+        const int baselineShift = titleH - renderer.getLineHeight(UI_10_FONT_ID);
+        renderer.drawText(UI_10_FONT_ID, margin + width - rightW, y + baselineShift, right);
+      }
+    }
+    listed++;
+    y += rowH;
+  }
+  if (f.total > listed && y + titleH <= pen.bottom) {
+    if (pen.paint) {
+      snprintf(line, sizeof(line), tr(STR_MORE_COUNT), static_cast<int>(f.total - listed));
+      renderer.drawText(UI_12_FONT_ID, margin, y, line);
+    }
+    y += titleH;
+  }
+  return y;
+}
+
+const ClockDigitFace* digitFaceFor(const uint8_t style) {
+  switch (style) {
+    case CrossPointSettings::CLOCK_STYLE_MODERN:
+      return &CLOCK_DIGITS_SEMIBOLD;
+    case CrossPointSettings::CLOCK_STYLE_LIGHT:
+      return &CLOCK_DIGITS_LIGHT;
+    default:
+      return nullptr;
+  }
+}
+
+// Draws the glyph's set bits as horizontal runs.
+void drawDigitGlyph(const GfxRenderer& renderer, const ClockDigitFace& font, const int index, const int penX,
+                    const int y) {
+  const ClockDigitGlyph& g = font.glyphs[index];
+  const uint8_t* row = font.bitmap + g.offset;
+  const int rowBytes = (g.width + 7) / 8;
+  const int x0 = penX + g.left;
+  const int y0 = y + g.top;
+  for (int dy = 0; dy < g.height; dy++, row += rowBytes) {
+    int runStart = -1;
+    for (int dx = 0; dx <= g.width; dx++) {
+      const bool ink = dx < g.width && (row[dx >> 3] & (0x80 >> (dx & 7)));
+      if (ink && runStart < 0) {
+        runStart = dx;
+      } else if (!ink && runStart >= 0) {
+        renderer.fillRect(x0 + runStart, y0 + dy, dx - runStart, 1);
+        runStart = -1;
+      }
+    }
+  }
+}
+
+// Every digit gets the widest digit's slot, so HH:MM keeps one width and the
+// colon stays put from minute to minute.
+int digitSlot(const ClockDigitFace& font) {
+  int slot = 0;
+  for (int d = 0; d < 10; d++) slot = std::max(slot, static_cast<int>(font.glyphs[d].advance));
+  return slot;
+}
+
+int slotWidth(const ClockDigitFace& font, const int index) {
+  return index < 10 ? digitSlot(font) : font.glyphs[index].advance;
+}
+
+// Draws glyph indices centred in their slots, the whole line centred on the
+// screen. Returns the line's width.
+int drawDigitLine(const GfxRenderer& renderer, const ClockDigitFace& font, const int* indices, const int count,
+                  const int y, const bool paint) {
+  int lineW = 0;
+  for (int i = 0; i < count; i++) lineW += slotWidth(font, indices[i]);
+  if (!paint) return lineW;
+  int x = (renderer.getScreenWidth() - lineW) / 2;
+  for (int i = 0; i < count; i++) {
+    const ClockDigitGlyph& g = font.glyphs[indices[i]];
+    const int slot = slotWidth(font, indices[i]);
+    drawDigitGlyph(renderer, font, indices[i], x + (slot - g.width) / 2 - g.left, y);
+    x += slot;
+  }
+  return lineW;
+}
+
+// The time as HH:MM (12-hour time keeps its leading zero too), plus the AM/PM
+// marker under its right end. Returns the y below it.
+int drawTime(const Pen& pen, const Face& f, const int y) {
+  const GfxRenderer& renderer = pen.renderer;
+  int hour = f.hour;
+  if (f.use12h) {
+    hour %= 12;
+    if (hour == 0) hour = 12;
+  }
+  int right;
+  int height;
+
+  if (const ClockDigitFace* font = digitFaceFor(f.style)) {
+    const int indices[5] = {hour / 10, hour % 10, CLOCK_DIGIT_COLON, f.minute / 10, f.minute % 10};
+    const int lineW = drawDigitLine(renderer, *font, indices, 5, y, pen.paint);
+    right = (renderer.getScreenWidth() + lineW) / 2;
+    height = font->height;
+  } else {
+    const Metrics m = metricsFor(renderer);
+    const int pairW = 2 * m.digitW + m.pairGap;
+    const int faceW = 2 * pairW + m.colonW;
+    int x = (renderer.getScreenWidth() - faceW) / 2;
+    if (pen.paint) {
+      drawDigit(renderer, m, x, y, hour / 10);
+      drawDigit(renderer, m, x + m.digitW + m.pairGap, y, hour % 10);
+      x += pairW;
+      drawColon(renderer, m, x, y);
+      x += m.colonW;
+      drawDigit(renderer, m, x, y, f.minute / 10);
+      drawDigit(renderer, m, x + m.digitW + m.pairGap, y, f.minute % 10);
+    }
+    right = (renderer.getScreenWidth() + faceW) / 2;
+    height = m.digitH;
+  }
+
+  int below = y + height;
+  if (f.use12h) {
+    below += height / 10;
+    if (pen.paint) {
+      const char* marker = HalClock::meridiem(f.hour);
+      const int markerX = right - renderer.getTextWidth(UI_12_FONT_ID, marker, EpdFontFamily::BOLD);
+      renderer.drawText(UI_12_FONT_ID, markerX, below, marker, true, EpdFontFamily::BOLD);
+    }
+    below += renderer.getLineHeight(UI_12_FONT_ID);
+  }
+  return below + height / 10;
+}
+
+int timeHeight(const GfxRenderer& renderer, const Face& f) {
+  const ClockDigitFace* font = digitFaceFor(f.style);
+  return font ? font->height : metricsFor(renderer).digitH;
+}
+
+// Time, status and list from `y`. Returns the y below the last line.
+int layoutFace(const Pen& pen, const Face& f, int y) {
+  y = drawTime(pen, f, y);
+  y = drawStatus(pen, f, y);
+  if (!hasList(f)) return y;
+  y += timeHeight(pen.renderer, f) / 6;
+  return f.summary ? drawSummary(pen, f, y) : drawNotifications(pen, f, y);
+}
+
+// Deterministic for a given face: update() redraws the previous minute to
+// rebuild the controller baseline, so the pixels must match the earlier paint.
+// Everything is centred as one block; a list too long for the screen starts
+// at the top margin and is cut off at the bottom one.
+void drawFace(const GfxRenderer& renderer, const Face& f) {
+  const int margin = renderer.getScreenWidth() / 16;
+  const int bottom = renderer.getScreenHeight() - margin;
+
+  // A list is measured to its natural end, not to the screen's.
+  const int height = layoutFace(Pen{renderer, false, INT_MAX / 2}, f, 0);
+
+  const int top = std::max(margin, (renderer.getScreenHeight() - height) / 2);
+  layoutFace(Pen{renderer, true, bottom}, f, top);
+}
+
+// "--:--" with a note, for an RTC that has no valid time (never set, or its
+// backup supply ran out).
+void drawUnsetFace(const GfxRenderer& renderer, const uint8_t style) {
+  int y;
+  int height;
+  if (const ClockDigitFace* font = digitFaceFor(style)) {
+    height = font->height;
+    y = (renderer.getScreenHeight() - height) / 2;
+    const int indices[5] = {CLOCK_DIGIT_DASH, CLOCK_DIGIT_DASH, CLOCK_DIGIT_COLON, CLOCK_DIGIT_DASH, CLOCK_DIGIT_DASH};
+    drawDigitLine(renderer, *font, indices, 5, y, true);
+  } else {
+    const Metrics m = metricsFor(renderer);
+    height = m.digitH;
+    y = (renderer.getScreenHeight() - height) / 2;
+    const int pairW = 2 * m.digitW + m.pairGap;
+    int x = (renderer.getScreenWidth() - (2 * pairW + m.colonW)) / 2;
+    for (int pair = 0; pair < 2; pair++) {
+      drawSegments(renderer, m, x, y, SEG_G);
+      drawSegments(renderer, m, x + m.digitW + m.pairGap, y, SEG_G);
+      x += pairW;
+      if (pair == 0) {
+        drawColon(renderer, m, x, y);
+        x += m.colonW;
+      }
+    }
+  }
+  char note[64];
+  snprintf(note, sizeof(note), "%s: %s", tr(STR_CLOCK), tr(STR_NOT_SET));
+  renderer.drawCenteredText(UI_12_FONT_ID, y + height + height / 5, note, true, EpdFontFamily::BOLD);
+}
+}  // namespace
+
+bool isSupported() { return gpio.deviceIsX3() && halClock.isAvailable(); }
+
+bool render(GfxRenderer& renderer) {
+  if (!isSupported()) return false;
+
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  renderer.clearScreen();
+
+  struct tm now;
+  if (!halClock.localTime(now, /*fresh=*/true)) {
+    // No wake timer: there is no time to keep updated.
+    LOG_ERR("CLK", "Clock sleep screen: RTC has no valid time");
+    drawUnsetFace(renderer, SETTINGS.clockStyle);
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    return true;
+  }
+
+  face.hour = static_cast<uint8_t>(now.tm_hour);
+  face.minute = static_cast<uint8_t>(now.tm_min);
+  face.shownMinutes = PhoneLink::localMinutes(now);
+  face.use12h = SETTINGS.clockFormat == 1;
+  face.style = SETTINGS.clockStyle;
+  const char* tz = getenv("TZ");
+  snprintf(face.posixTz, sizeof(face.posixTz), "%s", tz ? tz : "");
+  face.phoneSync = PhoneLink::isAvailable() && PhoneLink::isPaired();
+  face.phoneFailures = 0;
+  // Sync right after going to sleep rather than a minute later.
+  face.initialSyncPending = face.phoneSync;
+  face.notificationCount = 0;
+  face.summary = PhoneLink::detail() == PhoneLink::Detail::SenderAndApp;
+  face.total = 0;
+  face.senderCount = 0;
+  memset(&face.media, 0, sizeof(face.media));
+  face.phoneBattery = -1;
+  face.shownMinutes = PhoneLink::localMinutes(now);
+  face.language = SETTINGS.language;
+  face.deviceBattery = static_cast<uint8_t>(std::min<uint16_t>(powerManager.getBatteryPercentage(), 100));
+  face.quietHours = PhoneLink::quietHours();
+  face.lastSyncMinutes = 0;
+
+  drawFace(renderer, face);
+  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  face.magic = FACE_MAGIC;
+  return true;
+}
+
+bool isActive() { return face.magic == FACE_MAGIC; }
+
+bool hasPhone() { return isActive() && face.phoneSync; }
+
+void deactivate() { face.magic = 0; }
+
+void restoreLocale() {
+  halClock.setTimezone(face.posixTz);
+  I18N.setLanguage(static_cast<Language>(face.language));
+}
+
+bool needsRepaint(const struct tm& now) { return now.tm_hour != face.hour || now.tm_min != face.minute; }
+
+void update(GfxRenderer& renderer, const struct tm& now) {
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+
+  // A clean refresh once an hour keeps differential repaints from building up ghosting.
+  const bool cleanRefresh = now.tm_hour != face.hour;
+  if (!cleanRefresh) {
+    // display.begin() cleared the controller RAM. Reload it with the face on
+    // the glass so the differential waveform drives only the changed segments.
+    renderer.clearScreen();
+    drawFace(renderer, face);
+    renderer.cleanupGrayscaleWithFrameBuffer();
+  }
+
+  face.hour = static_cast<uint8_t>(now.tm_hour);
+  face.minute = static_cast<uint8_t>(now.tm_min);
+  face.shownMinutes = PhoneLink::localMinutes(now);
+  face.deviceBattery = static_cast<uint8_t>(std::min<uint16_t>(powerManager.getBatteryPercentage(), 100));
+  renderer.clearScreen();
+  drawFace(renderer, face);
+  if (cleanRefresh) {
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  } else {
+    renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+  }
+}
+
+bool takeInitialSync() {
+  const bool pending = face.initialSyncPending;
+  face.initialSyncPending = false;
+  return pending;
+}
+
+void restoreBaseline(GfxRenderer& renderer) {
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  renderer.clearScreen();
+  drawFace(renderer, face);
+  renderer.cleanupGrayscaleWithFrameBuffer();
+}
+
+bool phoneSyncDue(const struct tm& now) {
+  return face.phoneSync && !PhoneLink::inQuietHours(face.quietHours, now.tm_hour) &&
+         (face.phoneFailures < PHONE_BACKOFF_AFTER || now.tm_min % PHONE_BACKOFF_MINUTES == 0);
+}
+
+void applyPhoneSync(GfxRenderer& renderer, const bool ok, const PhoneLink::SyncResult& result) {
+  if (!ok) {
+    if (face.phoneFailures < UINT8_MAX) face.phoneFailures++;
+    // The failure count can make "iPhone not found" appear.
+    if (face.lastSyncMinutes == 0 && face.phoneFailures == 2) {
+      renderer.clearScreen();
+      drawFace(renderer, face);
+      renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+    }
+    return;
+  }
+  face.phoneFailures = 0;
+
+  if (result.gotTime) {
+    if (result.hasUtcOffset) {
+      // The phone's zone wins while asleep, so travel and DST changes follow
+      // it. POSIX offsets count west of UTC as positive.
+      const int32_t offset = result.utcOffsetSeconds;
+      const int32_t absOffset = offset < 0 ? -offset : offset;
+      snprintf(face.posixTz, sizeof(face.posixTz), "UTC%c%d:%02d", offset < 0 ? '+' : '-',
+               static_cast<int>(absOffset / 3600), static_cast<int>(absOffset % 3600 / 60));
+      halClock.setTimezone(face.posixTz);
+    }
+    halClock.adjustTo(result.utc, PHONE_TIME_TOLERANCE_S);
+  }
+
+  bool changed = false;
+  if (result.media.known && memcmp(&result.media, &face.media, sizeof(face.media)) != 0) {
+    // Only the title/artist/player lines show, so an album-only change skips the repaint.
+    const bool visibleChange = PhoneLink::isPlaying(result.media) != PhoneLink::isPlaying(face.media) ||
+                               strcmp(result.media.title, face.media.title) != 0 ||
+                               strcmp(result.media.artist, face.media.artist) != 0 ||
+                               strcmp(result.media.player, face.media.player) != 0;
+    face.media = result.media;
+    if (visibleChange) changed = true;
+  }
+  if (result.phoneBattery >= 0 && result.phoneBattery != face.phoneBattery) {
+    face.phoneBattery = result.phoneBattery;
+    changed = true;
+  }
+  if (result.gotNotifications && result.summary &&
+      (!face.summary || result.total != face.total || result.senderCount != face.senderCount ||
+       memcmp(result.senders, face.senders, sizeof(PhoneLink::Sender) * result.senderCount) != 0)) {
+    face.summary = true;
+    face.notificationCount = 0;
+    face.total = result.total;
+    face.senderCount = result.senderCount;
+    memcpy(face.senders, result.senders, sizeof(PhoneLink::Sender) * result.senderCount);
+    changed = true;
+  }
+  if (result.gotNotifications && !result.summary &&
+      (face.summary || result.count != face.notificationCount ||
+       memcmp(result.items, face.notifications, sizeof(PhoneLink::Notification) * result.count) != 0)) {
+    face.summary = false;
+    face.notificationCount = result.count;
+    memcpy(face.notifications, result.items, sizeof(PhoneLink::Notification) * result.count);
+    changed = true;
+  }
+  struct tm now;
+  const bool haveNow = halClock.localTime(now, /*fresh=*/true);
+  if (haveNow) {
+    const uint32_t synced = PhoneLink::localMinutes(now);
+    const bool wasStale = face.lastSyncMinutes == 0 || face.shownMinutes - face.lastSyncMinutes >= STALE_SYNC_MINUTES;
+    face.lastSyncMinutes = synced;
+    if (wasStale) changed = true;
+  }
+  if (haveNow && needsRepaint(now)) {
+    face.hour = static_cast<uint8_t>(now.tm_hour);
+    face.minute = static_cast<uint8_t>(now.tm_min);
+    face.shownMinutes = PhoneLink::localMinutes(now);
+    changed = true;
+  }
+  if (!changed) return;
+
+  // update() already left the controller holding the face on the glass.
+  renderer.clearScreen();
+  drawFace(renderer, face);
+  renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+}
+
+bool armWakeTimer() {
+  if (!isActive()) return false;
+
+  struct tm now;
+  if (!halClock.localTime(now, /*fresh=*/true)) {
+    LOG_ERR("CLK", "Clock sleep screen: RTC read failed, not arming wake timer");
+    return false;
+  }
+  const uint64_t untilNextMinuteUs =
+      needsRepaint(now) || face.initialSyncPending ? 0 : static_cast<uint64_t>(60 - now.tm_sec) * US_PER_SECOND;
+  const uint64_t delayUs = untilNextMinuteUs + WAKE_MARGIN_US;
+  esp_sleep_enable_timer_wakeup(delayUs);
+  LOG_DBG("CLK", "Clock sleep screen: next wake in %lu ms", static_cast<unsigned long>(delayUs / 1000));
+  return true;
+}
+
+}  // namespace ClockSleepScreen

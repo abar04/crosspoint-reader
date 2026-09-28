@@ -25,6 +25,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     BLANK = 5,
     QUICK_RESUME = 6,
     TRANSPARENT_CUSTOM = 7,
+    CLOCK = 8,  // Keep last: SettingsList drops it on boards without clock sleep support.
     SLEEP_SCREEN_MODE_COUNT
   };
   enum SLEEP_SCREEN_COVER_MODE { FIT = 0, CROP = 1, SLEEP_SCREEN_COVER_MODE_COUNT };
@@ -64,6 +65,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Auto follows the timezone's baked DST rule; On/Off override it — the
   // escape hatch for a zone whose law changed before the firmware caught up.
   enum CLOCK_DST_MODE { CLOCK_DST_AUTO = 0, CLOCK_DST_ON = 1, CLOCK_DST_OFF = 2, CLOCK_DST_MODE_COUNT };
+
+  // Digits of the Clock sleep screen: Inter SemiBold, Inter Light, or seven-segment.
+  enum CLOCK_STYLE { CLOCK_STYLE_MODERN = 0, CLOCK_STYLE_LIGHT = 1, CLOCK_STYLE_DIGITAL = 2, CLOCK_STYLE_COUNT };
 
   enum ORIENTATION {
     PORTRAIT = 0,       // 480x800 logical coordinates (current default)
@@ -248,6 +252,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t clockTimezone = 255;
   // CLOCK_DST_MODE: follow the zone's DST rule, or force it on/off.
   uint8_t clockDst = CLOCK_DST_AUTO;
+  // CLOCK_STYLE of the Clock sleep screen.
+  uint8_t clockStyle = CLOCK_STYLE_MODERN;
   // Show the clock opposite the battery in every header band that draws one.
   uint8_t clockShowInHeader = 0;
   // Set once an NTP sync succeeds. Used to skip re-syncing on every WiFi connect.

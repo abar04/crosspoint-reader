@@ -115,6 +115,11 @@ class HalGPIO {
   // Should only be called when wakeup reason is PowerButton.
   bool verifyPowerButtonWakeup();
 
+  // After a power-button wake: true when the waking press was a click
+  // (released within maxClickMs of boot) followed by a second press within
+  // windowMs. A press still held at maxClickMs is a normal wake.
+  bool powerWakeWasDoubleClick(unsigned long maxClickMs, unsigned long windowMs);
+
   // Check if USB is connected
   bool isUsbConnected() const;
 
@@ -126,7 +131,8 @@ class HalGPIO {
   // Returns true once per edge (plug or unplug) since the last update()
   bool wasUsbStateChanged() const;
 
-  enum class WakeupReason { PowerButton, AfterFlash, AfterUSBPower, Other };
+  // Timer: deep-sleep timer wake (armed by the Clock sleep screen).
+  enum class WakeupReason { PowerButton, Timer, AfterFlash, AfterUSBPower, Other };
 
   WakeupReason getWakeupReason() const;
 
